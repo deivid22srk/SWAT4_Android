@@ -52,11 +52,38 @@ Actions, por decisão de projeto).
 
 ## Resultado do gen
 
-(preenchido após `regen_gen.sh`; números por módulo em `analysis/swat4_regen_report.json`)
+`tools/regen_gen.sh "SWAT 4"` rodou sobre a cópia GOG base:
+
+* **33 módulos** (`Swat4.exe` + 32 DLLs), **80.848 funções**.
+* **434 arquivos `.c`**, **182 MB**; 33 tabelas `g_fn_table_*`.
+* 347 s de discovery + 184 s de lifting (≈ 9 min); pico de RAM **2,4 GB**
+  (`Engine.dll`).
+* `m4d.dll` falhou no primeiro lote (jump table fora da imagem) e foi
+  reprocessado depois da correção de bounds: 1.323 funções, 1.317 liftadas.
+* `dinterface.dll` foi excluído: nenhum módulo o importa.
+* Tabelas compilam e satisfazem `runtime/modules.c`; `gcc -fsyntax-only` passou
+  em `ogg/core/exe/swatgame/engine_00.c`; 0 símbolos `f_*` duplicados.
+* Por módulo: `analysis/swat4_regen_report.json` (não versionado).
 
 ## CI
 
-(preenchido após o primeiro run do workflow)
+O workflow foi depurado em runs reais; cada falha abaixo foi corrigida e
+re-executada, não simulada.
+
+| Run | Cenário | Resultado | Causa / correção |
+|---|---|---|---|
+| `40936429673` | app-only | falhou em 47 s | `./gradlew: Permission denied` — modo do arquivo. `chmod +x` + `git update-index --chmod=+x` |
+| `40936667919` | app-only | falhou em 1m29 | `CMake Error game/CMakeLists.txt:6`: o glob resolvia `android/gen`, não a raiz. `../../../` → `../../../../` |
+| `40937235775` | app-only | falhou em 1m17 | `ld.lld: undefined symbol touch_draw(IDirect3DDevice9*)`: declaração C++ sem `extern "C"`. Movida para escopo de arquivo como `extern "C" void touch_draw(void *)` |
+| `40937766811` | **app-only** | **sucesso** | APK `SWAT4-debug-apponly-8cfa7b8.apk`, 2,0 MB, artefato público. Inspeção: `lib/arm64-v8a/{libmain,libSDL2,libdxvk_d3d9,libc++_shared}.so`, `classes3.dex` com `LauncherActivity`/`GameActivity`, APK assinado |
+| `40938210435` | **completo** | **ver abaixo** | baixa `gen.tar.zst` da release privada `gen-v1` e compila |
+
+O APK app-only **não foi instalado** (não há aparelho Android neste ambiente);
+a inspeção acima é do arquivo, não de execução.
+
+### Build completo
+
+(preenchido após o run `40938210435`)
 
 ## Não testado de jeito nenhum
 
