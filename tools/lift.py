@@ -121,7 +121,7 @@ HOST_OVERRIDES_SWAT4 = {
              0x10018E8,  # ?appMemmove@@YAPAXPAXPBXH@Z
              0x10015F5,  # ?appMemset@@YAXPAXHH@Z
              0x100276B}, # ?appMemcmp@@YAHPBX0H@Z
-}
+    }
 # LIFT_GAME selects the overrides table: swat4 (default), wos, marvel or batman.
 _GAME = os.environ.get("LIFT_GAME", "swat4")
 HOST_OVERRIDES = {"marvel": HOST_OVERRIDES_MARVEL, "batman": HOST_OVERRIDES_BATMAN,

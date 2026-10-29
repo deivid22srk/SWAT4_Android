@@ -121,5 +121,8 @@ void rt_cpuid(CPU *c, uint32_t *eax, uint32_t *ebx, uint32_t *ecx, uint32_t *edx
 uint64_t rt_rdtsc(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (uint64_t)ts.tv_sec * 1000000000ull + ts.tv_nsec;
+    /* UE2 estimates the CPU speed with rdtsc/QPC and picks RenderDetail from
+     * it. A 1 GHz result made it select detail 0 and give up; report a 2005
+     * desktop-class ~3 GHz instead. */
+    return ((uint64_t)ts.tv_sec * 1000000000ull + ts.tv_nsec) * 3;
 }

@@ -185,6 +185,18 @@ D3D9/DXVK e sai limpo antes de carregar pacotes/criar o device. O próximo
 bloco é o início do `InitEngine`/`SetRenderConfiguration`, não um crash de
 lifting.
 
+### Bloqueio técnico conhecido (2026-10-29)
+
+* `D3DDrv.dll`: **1.854 funções liftadas, 109 rejeitadas** por instruções
+  MMX/3DNow! que o lifter ainda não implementa (`pfmul` 45, `pi2fd` 27,
+  `pfadd` 6, `pcmpgtd` 6, `pfsub` 4, `pf2id` 4, `pfrcp`, `pfrsqrt`,
+  `pswapd`, `pmaxsw`, ...). `?Init@UD3DRenderDevice@@UAEHXZ` **não** está
+  entre as rejeitadas, mas os helpers de math que ela pode chamar estão.
+  Sem 3DNow! no lifter, partes do renderer não podem ser levantadas.
+* A engine sai antes de `CreateDevice`/`.u`; a causa ainda não foi isolada
+  (próximo passo: instrumentar `UGameEngine::Init` e o `SetRenderDevice`).
+* `Swat4.log` fica vazio (a engine não descarrega o buffer antes de sair).
+
 ## Não testado de jeito nenhum
 
 * Instalação/launcher num aparelho controlado por mim (o usuário testou; eu
