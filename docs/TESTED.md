@@ -197,6 +197,28 @@ lifting.
   (próximo passo: instrumentar `UGameEngine::Init` e o `SetRenderDevice`).
 * `Swat4.log` fica vazio (a engine não descarrega o buffer antes de sair).
 
+### Correção da permissão de escrita (2026-10-29, pós-build #9)
+
+A engine chama, logo após `appInit`:
+
+```
+CreateFileW(game_dir, GENERIC_WRITE, share=7, OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS)
+```
+
+para testar a permissão de escrita na **pasta** do jogo. No Linux,
+`open(dir, O_WRONLY)` falha com `EISDIR`; a engine concluía
+`NoWritePermission`, mostrava uma `MessageBoxW` ("UNKNOWN", por falta de
+`W.i.ini`) e saía. **Corrigido** em `runtime/kernel32.c`: quando o caminho é
+um diretório, abre com `O_RDONLY | O_DIRECTORY` e devolve o handle.
+
+Depois da correção o jogo **passa da checagem de escrita**, inicializa o
+COMCTL32/janela e chega a uma **exceção C++** (`_CxxThrowException`,
+`info` na faixa do exe). O runtime ainda não implementa o unwinding de SEH/C++
+do MSVC (`__CxxFrameHandler`/`_except_handler3`), então aborta com o
+diagnóstico. Esse é o próximo bloqueio de runtime, junto com o 3DNow! do
+`D3DDrv`.
+
 ## Não testado de jeito nenhum
 
 * Instalação/launcher num aparelho controlado por mim (o usuário testou; eu

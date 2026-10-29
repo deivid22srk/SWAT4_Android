@@ -628,6 +628,7 @@ static void mkdirs_for(const char *path) {
 
 SHIM(CreateFileA) {
     const char *name = GSTR(ARG(0));
+    TRACE("CreateFileA(%s)", name ? name : "(null)");
     uint32_t access = ARG(1), disp = ARG(4);
     char host[1024];
     int exists = rt_host_path(name, host, sizeof host);
@@ -644,6 +645,14 @@ SHIM(CreateFileA) {
     }
     if (fl & O_CREAT) mkdirs_for(host);
     int fd = open(host, fl, 0644);
+    /* UE2 tests write permission by opening the game *directory* for
+     * GENERIC_WRITE with FILE_FLAG_BACKUP_SEMANTICS. Linux refuses O_WRONLY on
+     * a directory; a read-only directory handle is enough for that check. */
+    if (fd < 0 && (fl & O_ACCMODE) != O_RDONLY) {
+        struct stat st;
+        if (stat(host, &st) == 0 && S_ISDIR(st.st_mode))
+            fd = open(host, O_RDONLY | O_DIRECTORY);
+    }
     TRACE("CreateFileA %s -> %s fd=%d", name, host, fd);
     if (fd >= 0 && (fl & O_ACCMODE) == O_RDONLY && strstr(host, "/CachedShaders/")) {
         static uint32_t s_cache_hits;

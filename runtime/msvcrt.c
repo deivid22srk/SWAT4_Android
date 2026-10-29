@@ -318,7 +318,13 @@ SHIM(abort_) { rt_fatal("msvcrt abort()"); }
 SHIM(exit_) { LOG("msvcrt exit(%d)", (int)ARG(0)); fflush(NULL); _exit((int)ARG(0)); }
 SHIM(_purecall) { rt_fatal("pure virtual call"); }
 SHIM(_CxxThrowException) {
-    rt_fatal("C++ exception thrown in recompiled DLL (object %08x, info %08x)", ARG(0), ARG(1));
+    uint32_t obj = ARG(0), info = ARG(1);
+    char msg[512];
+    uint32_t mp = 0x11499d0, i = 0;
+    for (; i < 511 && M16(mp + 2 * i); i++) msg[i] = (char)M16(mp + 2 * i);
+    msg[i] = 0;
+    LOG("C++ exception: object=%08x info=%08x message=%s", obj, info, msg);
+    rt_fatal("C++ exception thrown in recompiled DLL (object %08x, info %08x)", obj, info);
 }
 SHIM(__CxxFrameHandler) { rt_fatal("__CxxFrameHandler invoked"); }
 SHIM(type_info_dtor) { RET(0, 0); } /* thiscall, no stack args */

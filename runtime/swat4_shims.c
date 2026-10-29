@@ -745,8 +745,16 @@ SHIM(gdi_CreatePen) { static uint32_t next = 0x7400; RET(next++, 3); }
 SHIM(gdi_BitBlt) { RET(1, 9); }
 SHIM(gdi_CreateSolidBrush) { static uint32_t next = 0x7500; RET(next++, 1); }
 SHIM(gdi_TextOutW) { RET(1, 5); }
-SHIM(gdi_GetTextExtentPoint32A) { if (ARG(3)) memset(MEM + ARG(3), 0, 8); RET(1, 4); }
-SHIM(gdi_GetTextExtentPoint32W) { if (ARG(3)) memset(MEM + ARG(3), 0, 8); RET(1, 4); }
+/* The exe calls winGetSizeANSI("MPTEST") right after appInit and exits if the
+ * result is 0. A zeroed SIZE made it take the "no display" path. Report a
+ * plausible 8x16 cell per character. */
+static void text_extent(uint32_t n, uint32_t out) {
+    if (!out) return;
+    M32(out) = (n ? n : 1) * 8;
+    M32(out + 4) = 16;
+}
+SHIM(gdi_GetTextExtentPoint32A) { text_extent(ARG(2), ARG(3)); RET(1, 4); }
+SHIM(gdi_GetTextExtentPoint32W) { text_extent(ARG(2), ARG(3)); RET(1, 4); }
 SHIM(gdi_CreateDIBitmap) { static uint32_t next = 0x7600; RET(next++, 6); }
 SHIM(gdi_PatBlt) { RET(1, 4); }
 SHIM(gdi_CreateFontW) { static uint32_t next = 0x7700; RET(next++, 14); }
@@ -830,6 +838,9 @@ SHIM(MapVirtualKeyW) { RET(0, 2); }
 SHIM(GetClassInfoExA) { RET(0, 2); }
 SHIM(GetClassInfoExW) { RET(0, 2); }
 SHIM(EnumChildWindows) { RET(1, 3); }
+SHIM(comctl_ord17) { RET(1, 1); }        /* InitCommonControlsEx / _TrackMouseEvent */
+SHIM(comctl_trackmouse) { RET(1, 1); }
+SHIM(comctl_init) { RET(0, 0); }
 SHIM(FindWindowA) { RET(0, 2); }
 SHIM(FindWindowW) { RET(0, 2); }
 SHIM(FindWindowExA) { RET(0, 4); }
@@ -1056,6 +1067,9 @@ static const ShimDef defs[] = {
     {"USER32.dll", "RemovePropA", shim_RemovePropA},
     {"USER32.dll", "RemovePropW", shim_RemovePropW},
     {"USER32.dll", "SetParent", shim_SetParent},
+    {"COMCTL32.dll", "#17", shim_comctl_ord17},
+    {"COMCTL32.dll", "_TrackMouseEvent", shim_comctl_trackmouse},
+    {"COMCTL32.dll", "InitCommonControls", shim_comctl_init},
     {"USER32.dll", "CreateDialogParamA", shim_CreateDialogParamA},
     {"USER32.dll", "CreateDialogParamW", shim_CreateDialogParamW},
     {"USER32.dll", "CreateDialogIndirectParamA", shim_CreateDialogIndirectParamA},
