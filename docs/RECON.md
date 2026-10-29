@@ -129,14 +129,16 @@ ter relocação, **fica em `0x10900000`**. Por isso a pilha guest foi movida par
 | `IGVisualEffectsSubsystem.dll` | `0x03600000` |
 | `Scripting.dll` | `0x03700000` |
 | `ScriptCompiler.dll` | `0x03800000` |
-| `dinterface.dll` | `0x03900000` |
 | `ogg.dll` | `0x03A00000` |
 | `vorbis.dll` | `0x03B00000` |
 | `vorbisfile.dll` | `0x03C00000` |
 | `Editor.dll` | `0x03D00000` |
 | `UnrealEdPerforce.dll` | `0x03E00000` |
 
-Faixas do runtime: pilha `0x1A000000` (30 slots de 4 MiB), TEB `0x1B000000`,
+`dinterface.dll` existe em `Content/System`, mas **nenhum módulo o importa**
+(verificado com `pefile`); não é parte do boot e não foi recompilado.
+
+Faixas do runtime: pilha `0x1A000000` (30 slots de 4 MiB), TEB `0x1C800000`,
 heap `0x20000000–0x40000000`, `VirtualAlloc` `0x40000000–0x60000000`, thunks de
 import `0xFF000000`. **Nenhuma dessas faixas foi validada em execução.**
 
