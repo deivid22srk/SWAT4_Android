@@ -64,17 +64,21 @@ size_t guest_vformat(char *out, size_t cap, const char *fmt, uint32_t argp) {
             break;
         case 's': case 'S': {
             uint32_t s = M32(argp); argp += 4;
-            spec[k++] = 's'; spec[k] = 0;
-            if ((conv == 'S') != (isl != 0) && s) {
-                /* wide string */
-                char nar[512];
-                int i = 0;
-                for (; i < 511 && M16(s + 2 * i); i++) nar[i] = (char)M16(s + 2 * i);
-                nar[i] = 0;
-                len = snprintf(tmp, sizeof tmp, spec, nar);
-            } else {
-                len = snprintf(tmp, sizeof tmp, spec, s ? (char *)(MEM + s) : "(null)");
+            char nar[512];
+            int i = 0;
+            if (s >= 0x10000 && s < 0xE0000000u) {
+                if ((conv == 'S') != (isl != 0)) {
+                    for (; i < 511 && M16(s + 2 * i); i++) nar[i] = (char)M16(s + 2 * i);
+                } else {
+                    for (; i < 511 && M8(s + i); i++) nar[i] = (char)M8(s + i);
+                }
             }
+            nar[i] = 0;
+            len = i;
+            /* Never hand guest data to snprintf: a malformed/blank argument
+             * must not walk off the 4 GiB guest mapping. */
+            memcpy(tmp, nar, (size_t)len);
+            tmp[len] = 0;
             break;
         }
         case 'e': case 'E': case 'f': case 'g': case 'G': case 'a': case 'A': {
@@ -323,8 +327,8 @@ SHIM(_CxxThrowException) {
     uint32_t mp = 0x11499d0, i = 0;
     for (; i < 511 && M16(mp + 2 * i); i++) msg[i] = (char)M16(mp + 2 * i);
     msg[i] = 0;
-    LOG("C++ exception: object=%08x info=%08x int=%d message=%s",
-        obj, info, obj ? (int)M32(obj) : 0, msg);
+    LOG("C++ exception: object=%08x info=%08x ret=%08x int=%d message=%s",
+        obj, info, M32(c->r[4]), obj ? (int)M32(obj) : 0, msg);
     rt_fatal("C++ exception thrown in recompiled DLL (object %08x, info %08x)", obj, info);
 }
 SHIM(__CxxFrameHandler) { rt_fatal("__CxxFrameHandler invoked"); }
@@ -502,16 +506,24 @@ SHIM(_mbstrlen) { RETC(strlen(GSTR(ARG(0)))); }
 /* _vsnwprintf(wchar_t *buf, size_t count, const wchar_t *fmt, va_list): the
  * format is narrowed; %s arguments are taken as narrow (only error text). */
 SHIM(_vsnwprintf) {
-    uint32_t wf = ARG(2), cap = ARG(1);
-    char fmt[1024];
-    int k = 0;
-    for (; k < 1023 && M16(wf + 2 * k); k++) fmt[k] = (char)M16(wf + 2 * k);
-    fmt[k] = 0;
-    char *buf = malloc(cap + 1);
-    size_t n = guest_vformat(buf, cap + 1, fmt, ARG(3));
-    for (uint32_t i = 0; i < cap && i <= n; i++) M16(ARG(0) + 2 * i) = (uint8_t)buf[i];
-    free(buf);
-    RETC(n < cap ? (int32_t)n : -1);
+    /* Copy the literal characters of the wide format, dropping conversions.
+     * The callers in Window.dll pass a varargs layout the generic formatter
+     * cannot walk safely; the result is only used for a window/debug name. */
+    uint32_t buf = ARG(0), cap = ARG(1), wf = ARG(2);
+    if (cap > (1u << 20)) cap = 1u << 20;
+    uint32_t i = 0, o = 0;
+    while (M16(wf + 2 * i) && o + 1 < cap) {
+        uint16_t ch = M16(wf + 2 * i);
+        if (ch == '%') {
+            uint16_t nx = M16(wf + 2 * (i + 1));
+            if (nx == '%') { M16(buf + 2 * o++) = '%'; i += 2; continue; }
+            if (nx) { i += 2; continue; }
+        }
+        M16(buf + 2 * o++) = ch;
+        i++;
+    }
+    M16(buf + 2 * o) = 0;
+    RETC((int32_t)o);
 }
 
 static const ShimDef defs[] = {

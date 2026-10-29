@@ -693,8 +693,46 @@ SHIM(GetAsyncKeyState) { RET(0, 1); }
 static uint32_t g_winmsg = 0xC000;
 SHIM(RegisterWindowMessageA) { RET(g_winmsg++, 1); }
 SHIM(RegisterWindowMessageW) { RET(g_winmsg++, 1); }
-SHIM(RegisterClassExW) { RET(1, 1); }
-SHIM(CreateWindowExW) { RET(0x00010001u, 12); }
+/* Window class registry: Window.dll registers WinBaseClass with
+ * RegisterClassExW and then asserts unless GetClassInfoExW returns it. */
+typedef struct { char name[128]; uint8_t wc[48]; } WinClass;
+static WinClass g_classes[64];
+static int g_nclasses;
+static int class_find(const char *n) {
+    for (int i = 0; i < g_nclasses; i++)
+        if (!strcasecmp(g_classes[i].name, n)) return i;
+    return -1;
+}
+SHIM(CreateWindowExW) {
+    uint32_t clsarg = ARG(1), wndproc = 0;
+    if (clsarg >= 0x10000) {
+        char cls[128]; gw2a(clsarg, cls, sizeof cls);
+        int ci = class_find(cls);
+        if (ci >= 0) wndproc = *(uint32_t *)(g_classes[ci].wc + 8);
+    } else {
+        int ci = (int)clsarg - 0xC000;
+        if (ci >= 0 && ci < g_nclasses) wndproc = *(uint32_t *)(g_classes[ci].wc + 8);
+    }
+    uint32_t hwnd = 0x00010001u;
+    static int create_depth;
+    if (wndproc && create_depth < 2) {
+        create_depth++;
+        uint32_t cs = gmalloc(48);
+        memset(MEM + cs, 0, 48);
+        M32(cs + 0) = ARG(11); M32(cs + 4) = ARG(10); M32(cs + 8) = ARG(9);
+        M32(cs + 12) = ARG(8); M32(cs + 16) = ARG(7); M32(cs + 20) = ARG(6);
+        M32(cs + 24) = ARG(5); M32(cs + 28) = ARG(4); M32(cs + 32) = ARG(3);
+        M32(cs + 36) = ARG(2); M32(cs + 40) = ARG(1); M32(cs + 44) = ARG(0);
+        uint32_t a[4] = {hwnd, 0x81 /* WM_NCCREATE */, 0, cs};
+        uint32_t r = rt_invoke(c, wndproc, 4, a);
+        if (!r) { gfree(cs); create_depth--; RET(0, 12); }
+        a[1] = 0x1; /* WM_CREATE */
+        rt_invoke(c, wndproc, 4, a);
+        gfree(cs);
+        create_depth--;
+    }
+    RET(hwnd, 12);
+}
 SHIM(DestroyWindow) { RET(1, 1); }
 SHIM(ShowWindow) { RET(0, 2); }
 SHIM(ReleaseCapture) { RET(1, 0); }
@@ -836,8 +874,81 @@ SHIM(UnregisterHotKey) { RET(1, 2); }
 SHIM(GetKeyNameTextW) { RET(0, 3); }
 SHIM(MapVirtualKeyW) { RET(0, 2); }
 SHIM(GetClassInfoExA) { RET(0, 2); }
-SHIM(GetClassInfoExW) { RET(0, 2); }
 SHIM(EnumChildWindows) { RET(1, 3); }
+SHIM(RegisterClassExW) {
+    uint32_t p = ARG(0);
+    char name[128]; gw2a(M32(p + 40), name, sizeof name);
+    int i = class_find(name);
+    LOG("RegisterClassExW '%s'", name);
+    if (i < 0) { if (g_nclasses >= 64) RET(0, 1); i = g_nclasses++; }
+    memset(g_classes[i].wc, 0, 48);
+    memcpy(g_classes[i].wc, MEM + p, 48);
+    snprintf(g_classes[i].name, sizeof g_classes[i].name, "%s", name);
+    RET(0xC000 + (uint32_t)i, 1);
+}
+SHIM(RegisterClassW) {
+    uint32_t p = ARG(0);
+    char name[128]; gw2a(M32(p + 36), name, sizeof name);
+    int i = class_find(name);
+    if (i < 0) { if (g_nclasses >= 64) RET(0, 1); i = g_nclasses++; }
+    memset(g_classes[i].wc, 0, 48);
+    *(uint32_t *)(g_classes[i].wc + 0) = 48;      /* cbSize */
+    memcpy(g_classes[i].wc + 4, MEM + p, 40);     /* WNDCLASS -> WNDCLASSEX */
+    snprintf(g_classes[i].name, sizeof g_classes[i].name, "%s", name);
+    RET(0xC000 + (uint32_t)i, 1);
+}
+static const char *const k_sys_classes[] = {
+    "SCROLLBAR", "BUTTON", "EDIT", "STATIC", "COMBOBOX", "LISTBOX", "MDICLIENT",
+    "SysTreeView32", "SysListView32", "SysHeader32", "SysTabControl32",
+    "msctls_trackbar32", "msctls_progress32", "msctls_statusbar32",
+    "msctls_updown32", "msctls_hotkey32", "tooltips_class32", "#32770",
+    "SysDateTimePick32", "SysMonthCal32",
+    /* comctl32 common controls the engine queries for its UI */
+    "RICHEDIT", "RICHEDIT20A", "RICHEDIT20W", "RICHEDIT50W",
+    "ToolbarWindow32", "ReBarWindow32", "SysAnimate32", "SysPager",
+    "SysIPAddress32", "ComboBoxEx32", "SysLink", "SysDragList32",
+    "SysTrackbar32", "SysProgress32", NULL};
+static int sys_class_p(const char *n) {
+    for (int i = 0; k_sys_classes[i]; i++)
+        if (!strcasecmp(n, k_sys_classes[i])) return 1;
+    return 0;
+}
+SHIM(GetClassInfoExW) {
+    char name[128]; gw2a(ARG(1), name, sizeof name);
+    int i = class_find(name);
+    LOG("GetClassInfoExW '%s' reg=%d sys=%d", name, i, sys_class_p(name));
+    if (i >= 0) {
+        memcpy(MEM + ARG(2), g_classes[i].wc, 48);
+        RET(1, 3);
+    }
+    if (sys_class_p(name)) {
+        /* Standard controls exist even though we do not register them. */
+        uint32_t out = ARG(2);
+        memset(MEM + out, 0, 48);
+        M32(out + 0) = 48;                                  /* cbSize */
+        M32(out + 8) = rt_import("USER32.dll", "DefWindowProcA"); /* lpfnWndProc */
+        RET(1, 3);
+    }
+    RET(0, 3);
+}
+SHIM(GetClassInfoW) {
+    char name[128]; gw2a(ARG(1), name, sizeof name);
+    int i = class_find(name);
+    if (i < 0) RET(0, 3);
+    memcpy(MEM + ARG(2), g_classes[i].wc + 4, 40);
+    RET(1, 3);
+}
+SHIM(UnregisterClassW) {
+    char name[128]; gw2a(ARG(0), name, sizeof name);
+    int i = class_find(name);
+    if (i >= 0) { g_classes[i] = g_classes[--g_nclasses]; }
+    RET(1, 2);
+}
+SHIM(DefWindowProcW) {
+    uint32_t msg = ARG(1);
+    if (msg == 0x81 /* WM_NCCREATE */) RET(1, 4);
+    RET(0, 4);
+}
 SHIM(comctl_ord17) { RET(1, 1); }        /* InitCommonControlsEx / _TrackMouseEvent */
 SHIM(comctl_trackmouse) { RET(1, 1); }
 SHIM(comctl_init) { RET(0, 0); }
@@ -1036,6 +1147,7 @@ static const ShimDef defs[] = {
     {"USER32.dll", "GetAsyncKeyState", shim_GetAsyncKeyState},
     {"USER32.dll", "RegisterWindowMessageA", shim_RegisterWindowMessageA},
     {"USER32.dll", "RegisterWindowMessageW", shim_RegisterWindowMessageW},
+    {"USER32.dll", "DefWindowProcW", shim_DefWindowProcW},
     {"USER32.dll", "RegisterClassExW", shim_RegisterClassExW},
     {"USER32.dll", "CreateWindowExW", shim_CreateWindowExW},
     {"USER32.dll", "DestroyWindow", shim_DestroyWindow},
@@ -1067,6 +1179,11 @@ static const ShimDef defs[] = {
     {"USER32.dll", "RemovePropA", shim_RemovePropA},
     {"USER32.dll", "RemovePropW", shim_RemovePropW},
     {"USER32.dll", "SetParent", shim_SetParent},
+    {"USER32.dll", "RegisterClassExW", shim_RegisterClassExW},
+    {"USER32.dll", "RegisterClassW", shim_RegisterClassW},
+    {"USER32.dll", "GetClassInfoExW", shim_GetClassInfoExW},
+    {"USER32.dll", "GetClassInfoW", shim_GetClassInfoW},
+    {"USER32.dll", "UnregisterClassW", shim_UnregisterClassW},
     {"COMCTL32.dll", "#17", shim_comctl_ord17},
     {"COMCTL32.dll", "_TrackMouseEvent", shim_comctl_trackmouse},
     {"COMCTL32.dll", "InitCommonControls", shim_comctl_init},

@@ -223,6 +223,27 @@ Esse é o próximo bloqueio de runtime, junto com o 3DNow! do `D3DDrv`.
 Também foi adicionado um stub do COMCTL32 (`#17`, `_TrackMouseEvent`,
 `InitCommonControls`) para a inicialização da janela.
 
+### Janela / GUI (pós-build #9)
+
+Depois da correção da permissão de escrita, a engine passou a falhar em
+`GetClassInfoExW(NULL, WinBaseClass, &Cls)` (`Window.cpp:1195`). Correções:
+
+* **registro de classes de janela** (`RegisterClassW/ExW`, `GetClassInfoW/ExW`,
+  `UnregisterClassW`) em `runtime/swat4_shims.c`;
+* fallback para as **classes padrão/comctl32** que o jogo consulta
+  (`SCROLLBAR`, `RICHEDIT`, `ToolbarWindow32`, `SysTreeView32`, ...);
+* `DefWindowProcW`;
+* `CreateWindowExW` agora envia `WM_NCCREATE`/`WM_CREATE` ao WNDPROC
+  registrado (com limite de profundidade, porque `WM_CREATE` cria janelas
+  filhas); `hWndCreated==hWnd` deixou de disparar;
+* `_vsnwprintf` reescrito para copiar só os literais do formato (o va_list
+  vindo de `Window.dll` não é compatível com o formatador genérico e fazia
+  `snprintf` andar até o fim do mmap).
+
+Estado atual: a engine passa das asserções e chega ao fim da criação da
+janela, mas ainda chama `appRequestExit(1)` (`throw int 1`, capturado pelo
+SEH do `WinMain`). O unwinding SEH/C++ continua não implementado.
+
 ## Não testado de jeito nenhum
 
 * Instalação/launcher num aparelho controlado por mim (o usuário testou; eu
