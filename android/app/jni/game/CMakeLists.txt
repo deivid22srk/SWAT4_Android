@@ -1,13 +1,13 @@
 # Recompiled game code (gen/) plus the runtime, linked into libmain.so.
 # gen/ is generated from the user's own copy of the game and is never in git;
 # CI uses ci/gen_stub (empty tables) for the app-only build.
-file(GLOB GEN_SRC ${CMAKE_CURRENT_SOURCE_DIR}/../../../gen/*.c)
+file(GLOB GEN_SRC ${CMAKE_CURRENT_SOURCE_DIR}/../../../../gen/*.c)
 if(NOT GEN_SRC)
     message(FATAL_ERROR "no gen/*.c: run tools/regen_gen.sh, or copy ci/gen_stub into gen/ for an app-only build")
 endif()
 
-file(GLOB RT_C_SRC ${CMAKE_CURRENT_SOURCE_DIR}/../../../runtime/*.c)
-file(GLOB RT_CXX_SRC ${CMAKE_CURRENT_SOURCE_DIR}/../../../runtime/*.cpp)
+file(GLOB RT_C_SRC ${CMAKE_CURRENT_SOURCE_DIR}/../../../../runtime/*.c)
+file(GLOB RT_CXX_SRC ${CMAKE_CURRENT_SOURCE_DIR}/../../../../runtime/*.cpp)
 
 add_library(main SHARED ${GEN_SRC} ${RT_C_SRC} ${RT_CXX_SRC})
 
@@ -24,8 +24,8 @@ target_compile_options(main PRIVATE -fno-strict-aliasing -fwrapv)
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fno-strict-aliasing -fwrapv")
 
 target_include_directories(main PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/../../../runtime
-    ${CMAKE_CURRENT_SOURCE_DIR}/../../../gen
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../../../runtime
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../../../gen
     ${CMAKE_CURRENT_SOURCE_DIR}/../sdlinc
     ${CMAKE_CURRENT_SOURCE_DIR}/../dxvk/include/native/directx
     ${CMAKE_CURRENT_SOURCE_DIR}/../dxvk/include/native/windows)
