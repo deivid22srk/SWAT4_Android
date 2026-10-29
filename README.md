@@ -32,7 +32,7 @@ em um repositório **privado** separado, `deivid22srk/SWAT4_codegen`.
 | Vídeo Bink | **Módulo no mapa, não validado** | `binkw32.dll`, `FBinkMovie` |
 | Launcher (pasta, tamanho + SHA-1, lista do que falta) | **Implementado, não testado em aparelho** | `LauncherActivity.java`; classes presentes no APK |
 | Overlay de toque | **Não implementado** | stub `runtime/touch_swat4.cpp` |
-| CI (`build.yml`) | **Implementado** | app-only público; build completo em release privada |
+| CI (`build.yml`) | **Verde nos dois modos** | app-only público (APK 2 MB); completo privado (APK 24 MB, `libmain.so` 56 MB, 80.848 funções) |
 | **Jogo chega ao menu principal** | **Não** | não há otimismo aqui |
 
 ## Como funciona

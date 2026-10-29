@@ -83,7 +83,26 @@ a inspeção acima é do arquivo, não de execução.
 
 ### Build completo
 
-(preenchido após o run `40938210435`)
+Run **`40938210435`** (`workflow_dispatch`, `gen_tag=gen-v1`, `jobs=3`):
+**sucesso em 9m53s**. O passo `Fetch gen/` registrou `gen files: 434; modules: 33`.
+
+Prova de que o codegen foi compilado e linkado (inspeção do APK baixado da
+release **privada** `SWAT4_codegen@gen-v1`):
+
+| Item | app-only | completo |
+|---|---|---|
+| APK | 2.071.446 bytes | **24.244.530 bytes** |
+| `lib/arm64-v8a/libmain.so` | 387.920 bytes | **58.398.176 bytes (56 MB)** |
+| símbolos `f_*` no `.so` | 0 | **80.848** |
+| tabelas `g_fn_table_*` | 33 (vazias) | **33** |
+| `g_fn_table_engine` | 1 entrada `{0,0}` | **0x99E40 bytes = 630.336 B / 39.396 entradas** |
+
+O `libmain.so` é ELF aarch64, `BuildID=fcbc4b56…`, *stripped* (o *strip* do
+Gradle remove nomes locais, mas os símbolos globais das tabelas e os `f_*`
+permanecem). O APK completo **não** é artefato público: só existe na release
+privada.
+
+**Não instalado / não executado**: não há aparelho Android neste ambiente.
 
 ## Não testado de jeito nenhum
 
