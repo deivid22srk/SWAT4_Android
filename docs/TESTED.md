@@ -213,11 +213,15 @@ para testar a permissão de escrita na **pasta** do jogo. No Linux,
 um diretório, abre com `O_RDONLY | O_DIRECTORY` e devolve o handle.
 
 Depois da correção o jogo **passa da checagem de escrita**, inicializa o
-COMCTL32/janela e chega a uma **exceção C++** (`_CxxThrowException`,
-`info` na faixa do exe). O runtime ainda não implementa o unwinding de SEH/C++
-do MSVC (`__CxxFrameHandler`/`_except_handler3`), então aborta com o
-diagnóstico. Esse é o próximo bloqueio de runtime, junto com o 3DNow! do
-`D3DDrv`.
+COMCTL32/janela e chega a uma **exceção C++**: `_ThrowInfo` em `0x109210C8`
+(exe), tipo `_TypeDescriptor` `.H` (**`int`**), valor **`1`**. É um
+`throw <código>` do exe capturado pelo handler SEH do `WinMain`. O runtime
+ainda não implementa o unwinding de SEH/C++ do MSVC
+(`__CxxFrameHandler`/`_except_handler3`), então aborta com o diagnóstico.
+Esse é o próximo bloqueio de runtime, junto com o 3DNow! do `D3DDrv`.
+
+Também foi adicionado um stub do COMCTL32 (`#17`, `_TrackMouseEvent`,
+`InitCommonControls`) para a inicialização da janela.
 
 ## Não testado de jeito nenhum
 

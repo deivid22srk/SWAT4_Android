@@ -323,7 +323,8 @@ SHIM(_CxxThrowException) {
     uint32_t mp = 0x11499d0, i = 0;
     for (; i < 511 && M16(mp + 2 * i); i++) msg[i] = (char)M16(mp + 2 * i);
     msg[i] = 0;
-    LOG("C++ exception: object=%08x info=%08x message=%s", obj, info, msg);
+    LOG("C++ exception: object=%08x info=%08x int=%d message=%s",
+        obj, info, obj ? (int)M32(obj) : 0, msg);
     rt_fatal("C++ exception thrown in recompiled DLL (object %08x, info %08x)", obj, info);
 }
 SHIM(__CxxFrameHandler) { rt_fatal("__CxxFrameHandler invoked"); }
