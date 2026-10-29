@@ -1224,6 +1224,10 @@ SHIM(GetProcAddress) {
     else snprintf(name, sizeof name, "%s", GSTR(pn));
     const char *dll = m ? m->name : module_name_of(ARG(0)) ? module_name_of(ARG(0)) : GAME_EXE;
     uint32_t r = rt_import_opt(dll, name);
+    /* UE2's ALAudio probes the main module for OpenAL; the implementation is
+     * the recompiled DefOpenAL32.dll (also known as OpenAL32.dll). */
+    if (!r && name[0] == 'a' && name[1] == 'l')
+        r = rt_import_opt("DefOpenAL32.dll", name);
     TRACE("GetProcAddress(%s, %s) = %08x", dll, name, r);
     RET(r, 2);
 }
@@ -1862,7 +1866,7 @@ static const ShimDef k32[] = {
     S(SetUnhandledExceptionFilter) S(UnhandledExceptionFilter) S(SetConsoleCtrlHandler)
     S(OutputDebugStringA) S(OutputDebugStringW) S(DebugBreak) S(FatalAppExitA) S(ExitProcess)
     S(TerminateProcess) S(RaiseException) S(RtlUnwind)
-    S(GetModuleHandleA) S(LoadLibraryA) S(LoadLibraryW) S(FreeLibrary) S(GetProcAddress) S(GetModuleFileNameA)
+    S(GetModuleHandleA) S(GetModuleHandleW) S(LoadLibraryA) S(LoadLibraryW) S(LoadLibraryExW) S(FreeLibrary) S(GetProcAddress) S(GetModuleFileNameA)
     S(GetConsoleCP) S(GetConsoleOutputCP) S(GetConsoleMode) S(WriteConsoleA) S(WriteConsoleW)
     S(GetACP) S(GetOEMCP) S(IsValidCodePage) S(GetCPInfo) S(MultiByteToWideChar) S(WideCharToMultiByte)
     S(GetUserDefaultLCID) S(GetUserDefaultLangID) S(GetUserGeoID) S(IsValidLocale) S(EnumSystemLocalesA)

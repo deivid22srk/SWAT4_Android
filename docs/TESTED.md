@@ -143,12 +143,24 @@ Progresso observado, em ordem, ao longo das iterações:
 6. `GetModuleHandle(NULL)` devolvia `0x00400000` em vez de `0x10900000` —
    corrigido para `GAME_EXE_BASE`.
 
-Estado final do desktop: o jogo carrega todos os módulos, executa `appInit`,
-inicializa o **D3D9 via DXVK v1.9.2** (`Driver: 25.2.8`), grava `S.ini` e sai
-com `exit(0)` — **sem crash**. `Swat4.log` fica vazio e não há chamada a
-`GetMessage`/`PeekMessage` antes da saída. **Não chegou ao menu principal**; a
-causa da saída limpa ainda não foi identificada (próximo passo: hook em
-`FOutputDevice::Logf` e no retorno de `WinMain`).
+7. Áudio OpenAL: a engine logava `Missing function 'alEnable' for '_AL'
+   support`. Causa: `ALAudio` pede `OpenAL32.dll`, o módulo do jogo é
+   `DefOpenAL32.dll`. Alias no loader (`OpenAL32` → `DefOpenAL32`) + fallback no
+   `GetProcAddress` para símbolos `al*`. O erro sumiu e o device ALAudio
+   inicializa no desktop.
+8. `LoadLibraryExW` estava definido mas não registrado no `k32_init` — corrigido.
+9. `?appInit@@YAX...` é **`void`** (o `YAX`), então o `eax=0` do primeiro
+   diagnóstico não indicava falha. Instrumentei `FOutputDevice::Logf` para ler
+   as mensagens da engine (formatação wide) e removi os hooks de diagnóstico
+   depois.
+
+Estado final do desktop: o jogo carrega todos os módulos, inicializa o áudio
+(OpenAL), inicializa o **D3D9 via DXVK v1.9.2** (`Driver: 25.2.8`), grava
+`S.ini` e sai com `exit(0)` — **sem crash**. `Swat4.log` fica vazio e não há
+chamada a `GetMessage`/`PeekMessage` antes da saída. **Não chegou ao menu
+principal**: o `WinMain` retorna depois da inicialização do renderer; isolar
+qual checagem de device/capability faz a engine desistir é o próximo passo
+(hook em `UGameEngine::Init`/criação do device D3D9).
 
 Correções desta sessão estão no código (`runtime/swat4_shims.c`,
 `runtime/main.c`, `runtime/kernel32.c`, `runtime/msvcrt.c`,

@@ -44,6 +44,9 @@ static const char *dll_base(const char *dll, char *buf, size_t n) {
     snprintf(buf, n, "%s", p);
     char *dot = strrchr(buf, '.');
     if (dot) *dot = 0;
+    /* ALAudio imports OpenAL from "OpenAL32.dll"; the recompiled module is the
+     * game's DefOpenAL32.dll, so both names must resolve to the same exports. */
+    if (!strcasecmp(buf, "openal32")) snprintf(buf, n, "defopenal32");
     return buf;
 }
 

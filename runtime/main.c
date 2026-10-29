@@ -364,6 +364,10 @@ extern const char *const g_dll_modules[];
 extern const uint32_t g_dll_bases[];
 
 int rt_dll_index(const char *name) {
+    /* UE2's ALAudio asks for OpenAL32.dll; the GOG install ships the same
+     * library as DefOpenAL32.dll (the "Def" driver copy). */
+    if (!strcasecmp(name, "OpenAL32.dll") || !strcasecmp(name, "OpenAL32"))
+        name = "DefOpenAL32.dll";
     for (int i = 0; g_dll_modules[i]; i++)
         if (!strcasecmp(g_dll_modules[i], name)) return i;
     return -1;

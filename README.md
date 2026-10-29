@@ -29,7 +29,7 @@ em um repositório **privado** separado, `deivid22srk/SWAT4_codegen`.
 | Runtime Win32 (kernel32/user32/advapi32/msvcrt/ole32/…) | **Parcial, ampliado** | wide-char/stdio/`std::string`/arquivos/eventos; import sem shim aborta com o nome |
 | Boot desktop (Linux x86-64) | **Avançado** | 33 módulos, `appInit`, **D3D9/DXVK v1.9.2 inicializa**; sai com `exit(0)` (ver `docs/TESTED.md`) |
 | Gráficos D3D9 → Vulkan (dxvk-native) | **Vendorizado, não validado** | `D3DDrv.dll` importa `Direct3DCreate9`; `vs_3_0`/`ps_3_0` |
-| Áudio OpenAL 1.x + EAX + Vorbis | **Módulos no mapa, não validado** | `DefOpenAL32.dll`, `vorbis*`, `ogg` |
+| Áudio OpenAL 1.x + EAX + Vorbis | **Inicializa no desktop** | alias `OpenAL32`→`DefOpenAL32`; device ALAudio sobe; EAX/voz não validados |
 | Vídeo Bink | **Módulo no mapa, não validado** | `binkw32.dll`, `FBinkMovie` |
 | Launcher (pasta, tamanho + SHA-1, lista do que falta) | **Implementado, não testado em aparelho** | `LauncherActivity.java`; classes presentes no APK |
 | Overlay de toque | **Não implementado** | stub `runtime/touch_swat4.cpp` |
