@@ -166,6 +166,25 @@ Correções desta sessão estão no código (`runtime/swat4_shims.c`,
 `runtime/main.c`, `runtime/kernel32.c`, `runtime/msvcrt.c`,
 `runtime/dispatch.c`, `tools/discover.py`, `tools/lift.py`).
 
+### Build #7 (`ebe6f7c`) no aparelho — log do usuário
+
+O usuário instalou o APK de `ebe6f7c` e enviou o log
+(<https://github.com/deivid22srk/SWAT4_Android/releases/download/Log/log.txt>,
+295.342 linhas). Resultado:
+
+* janela SDL `2400x1080`;
+* **DXVK v1.9.2 sobe no celular**, `Vulkan: 1.1.128`;
+* `Direct3DCreate9(31)` chamado por `RTCShader.dll` (`ret=027022a7`);
+* `GetProcAddress(OpenAL32.dll, alEnable) = 0` (bug corrigido em `658bd68`);
+* termina em `msvcrt exit(0)`, **sem crash**;
+* **nenhum** `CreateFileA/W` de `.u`/`.utx`/`.s4m` aparece, **nenhum**
+  `CreateDevice` é chamado, e `Swat4.log` fica vazio.
+
+Conclusão: o aparelho chega ao mesmo ponto do desktop — inicializa áudio e
+D3D9/DXVK e sai limpo antes de carregar pacotes/criar o device. O próximo
+bloco é o início do `InitEngine`/`SetRenderConfiguration`, não um crash de
+lifting.
+
 ## Não testado de jeito nenhum
 
 * Instalação/launcher num aparelho controlado por mim (o usuário testou; eu
