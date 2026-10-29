@@ -120,6 +120,19 @@ jobs:
           echo "gen files: $(find gen -name '*.c' | wc -l); modules: $(find gen -name '*_table.c' | wc -l)"
           du -sh gen
 
+      - name: Verify gen/ before the build
+        if: ${{ vars.GEN_REPO != '' }}
+        run: |
+          set -euo pipefail
+          n=$(find gen -name '*.c' | wc -l)
+          m=$(find gen -name '*_table.c' | wc -l)
+          echo "gen/: $n C files, $m module tables"
+          for t in exe core engine window windrv d3ddrv alaudio swatgame swatgui; do
+            [ -f "gen/${t}_table.c" ] || { echo "::error::gen/${t}_table.c missing: gen/ is incomplete"; exit 1; }
+          done
+          grep -q 'g_fn_count_engine' gen/engine_table.c
+          echo "::notice::these files are compiled into libmain.so by the Build APK step (CMake globs gen/*.c)"
+
       - name: Use ci/gen_stub (app-only)
         if: ${{ vars.GEN_REPO == '' }}
         run: |
