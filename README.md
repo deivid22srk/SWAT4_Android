@@ -12,9 +12,10 @@ em um repositório **privado** separado, `deivid22srk/SWAT4_codegen`.
 > ## Status: início, e ainda não jogável
 >
 > O reconhecimento, o mapa de módulos, o pipeline de discovery/lifting e o app
-> Android existem. O APK **app-only** instala e valida a pasta do jogo. O jogo
-> **não** foi levado ao menu principal. Veja a tabela abaixo e
-> `docs/TESTED.md` para o que foi realmente executado.
+> Android existem. O APK **app-only** foi gerado no CI e contém o launcher que
+> valida a pasta do jogo; a **instalação em aparelho não foi testada** (não há
+> Android neste ambiente). O jogo **não** foi levado ao menu principal. Veja a
+> tabela abaixo e `docs/TESTED.md` para o que foi realmente executado.
 
 ## Status
 
@@ -29,7 +30,7 @@ em um repositório **privado** separado, `deivid22srk/SWAT4_codegen`.
 | Gráficos D3D9 → Vulkan (dxvk-native) | **Vendorizado, não validado** | `D3DDrv.dll` importa `Direct3DCreate9`; `vs_3_0`/`ps_3_0` |
 | Áudio OpenAL 1.x + EAX + Vorbis | **Módulos no mapa, não validado** | `DefOpenAL32.dll`, `vorbis*`, `ogg` |
 | Vídeo Bink | **Módulo no mapa, não validado** | `binkw32.dll`, `FBinkMovie` |
-| Launcher (pasta, tamanho + SHA-1, lista do que falta) | **Implementado** | `LauncherActivity.java` |
+| Launcher (pasta, tamanho + SHA-1, lista do que falta) | **Implementado, não testado em aparelho** | `LauncherActivity.java`; classes presentes no APK |
 | Overlay de toque | **Não implementado** | stub `runtime/touch_swat4.cpp` |
 | CI (`build.yml`) | **Implementado** | app-only público; build completo em release privada |
 | **Jogo chega ao menu principal** | **Não** | não há otimismo aqui |
