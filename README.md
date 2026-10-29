@@ -26,7 +26,8 @@ em um repositório **privado** separado, `deivid22srk/SWAT4_codegen`.
 | `docs/REFERENCE.md` (Fase 0, OpenSA2) | **Feito** | o OpenSA2 real usa Remill/LLVM; o enunciado supunha outro pipeline |
 | Discovery (`tools/discover.py`) | **Feito no conjunto base** | números em `docs/RECON.md` §12 |
 | Lifting (`tools/lift.py`) | **Executado no conjunto base** | ver `docs/TESTED.md` |
-| Runtime Win32 (kernel32/user32/advapi32/msvcrt/ole32/…) | **Parcial** | import sem shim aborta com o nome, nunca em silêncio |
+| Runtime Win32 (kernel32/user32/advapi32/msvcrt/ole32/…) | **Parcial, ampliado** | wide-char/stdio/`std::string`/arquivos/eventos; import sem shim aborta com o nome |
+| Boot desktop (Linux x86-64) | **Avançado** | 33 módulos, `appInit`, **D3D9/DXVK v1.9.2 inicializa**; sai com `exit(0)` (ver `docs/TESTED.md`) |
 | Gráficos D3D9 → Vulkan (dxvk-native) | **Vendorizado, não validado** | `D3DDrv.dll` importa `Direct3DCreate9`; `vs_3_0`/`ps_3_0` |
 | Áudio OpenAL 1.x + EAX + Vorbis | **Módulos no mapa, não validado** | `DefOpenAL32.dll`, `vorbis*`, `ogg` |
 | Vídeo Bink | **Módulo no mapa, não validado** | `binkw32.dll`, `FBinkMovie` |

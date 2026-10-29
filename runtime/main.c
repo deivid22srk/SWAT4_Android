@@ -196,8 +196,17 @@ static int bink_test(CPU *c, const char *movie, const char *outdir) {
 #include <ucontext.h>
 /* Crash report: host backtrace plus the faulting address. */
 static void on_crash(int sig, siginfo_t *si, void *uc) {
-    (void)uc;
     fprintf(stderr, "CRASH: signal %d at address %p\n", sig, si->si_addr);
+#if defined(__x86_64__)
+    ucontext_t *u = uc;
+    greg_t *g = u->uc_mcontext.gregs;
+    fprintf(stderr, "  rip=%llx rsp=%llx rax=%llx rcx=%llx rdx=%llx rbx=%llx rsi=%llx rdi=%llx\n",
+            (unsigned long long)g[REG_RIP], (unsigned long long)g[REG_RSP],
+            (unsigned long long)g[REG_RAX], (unsigned long long)g[REG_RCX],
+            (unsigned long long)g[REG_RDX], (unsigned long long)g[REG_RBX],
+            (unsigned long long)g[REG_RSI], (unsigned long long)g[REG_RDI]);
+    fprintf(stderr, "  fault = MEM %+td\n", (uint8_t *)si->si_addr - MEM);
+#endif
     void *bt[64];
     int n = backtrace(bt, 64);
     backtrace_symbols_fd(bt, n, 2);
@@ -211,6 +220,7 @@ static void install_crash_handler(void) {
     sigaction(SIGSEGV, &sa, NULL);
     sigaction(SIGBUS, &sa, NULL);
     sigaction(SIGFPE, &sa, NULL);
+    sigaction(SIGABRT, &sa, NULL);
 }
 #elif defined(__ANDROID__)
 #include <signal.h>
@@ -343,6 +353,34 @@ static int cfg_int(const char *path, const char *key, int def) {
     return v;
 }
 
+/* DLLs whose DllMain has run. On Windows only the exe's static import
+ * closure exists before WinMain; the engine loads the renderer, audio driver,
+ * GUI and game modules with LoadLibrary after appInit has created GMalloc.
+ * Running their static initializers earlier hits "Called appMalloc before
+ * memory init" in AllocateNameEntry. */
+static uint32_t g_dll_entry[64];
+static uint8_t g_dll_inited[64];
+extern const char *const g_dll_modules[];
+extern const uint32_t g_dll_bases[];
+
+int rt_dll_index(const char *name) {
+    for (int i = 0; g_dll_modules[i]; i++)
+        if (!strcasecmp(g_dll_modules[i], name)) return i;
+    return -1;
+}
+uint32_t rt_ensure_dll_init(CPU *c, const char *name) {
+    int i = rt_dll_index(name);
+    if (i < 0) return 0;
+    if (!g_dll_inited[i]) {
+        g_dll_inited[i] = 1;
+        if (g_dll_entry[i]) {
+            uint32_t args[3] = {g_dll_bases[i], 1, 0};
+            rt_invoke(c, g_dll_entry[i], 3, args);
+        }
+    }
+    return g_dll_bases[i];
+}
+
 int main(int argc, char **argv) {
     install_crash_handler();
     const char *env = getenv("LB_LOG");
@@ -387,6 +425,7 @@ int main(int argc, char **argv) {
 #endif
     MEM = mmap(NULL, 1ull << 32, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
     if (MEM == MAP_FAILED) rt_fatal("cannot reserve guest address space");
+    LOG("guest memory at %p (4 GiB)", (void *)MEM);
     /* keep the null page inaccessible to catch null derefs */
     mprotect(MEM, 0x10000, PROT_NONE);
     rt_init_shims();
@@ -402,18 +441,23 @@ extern void platform_init(void);
     /* DLLs first so the exe's imports bind to their exports */
     extern const char *const g_dll_modules[];
     extern const uint32_t g_dll_bases[];
-    uint32_t dll_entries[64];
     int ndll = 0;
     for (; g_dll_modules[ndll]; ndll++)
-        dll_entries[ndll] = load_pe(g_dll_modules[ndll], g_dll_bases[ndll], g_dll_modules[ndll]);
+        g_dll_entry[ndll] = load_pe(g_dll_modules[ndll], g_dll_bases[ndll], g_dll_modules[ndll]);
     load_pe(GAME_EXE, 0, GAME_EXE);
     extern void touch_setup_guest(void);
     touch_setup_guest();
-    for (int i = 0; i < ndll; i++) {
-        uint32_t args[3] = {g_dll_bases[i], 1, 0};
-        if (dll_entries[i] && !rt_invoke(c, dll_entries[i], 3, args))
-            rt_fatal("DllMain of %s failed", g_dll_modules[i]);
-    }
+    /* Static import closure of Swat4.exe (verified with pefile): its own game
+     * DLL imports plus their transitive game-DLL dependencies. Everything
+     * else is initialised on demand by LoadLibrary. */
+    static const char *const k_preload[] = {
+        "ogg.dll", "vorbis.dll", "vorbisfile.dll", "binkw32.dll", "m4d.dll",
+        "IFC23.dll", "IrrSupport.dll", "RenderUtilities.dll",
+        "Core.dll", "Engine.dll", "Scripting.dll", "Window.dll",
+        "AICommon.dll", "SwatAIAwareness.dll", "ALAudio.dll", NULL};
+    for (int i = 0; k_preload[i]; i++)
+        if (!rt_ensure_dll_init(c, k_preload[i]))
+            rt_fatal("preload: %s is not in the module map", k_preload[i]);
     /* push a return address that ends the process when main returns */
     c->r[4] -= 4;
     M32(c->r[4]) = 0;

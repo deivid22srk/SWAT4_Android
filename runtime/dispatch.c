@@ -56,10 +56,11 @@ void rt_call(CPU *c, uint32_t t) {
     if (t >= GUEST_THUNK_BASE) {
         uint32_t i = (t - GUEST_THUNK_BASE) / 4;
         if (i < g_nthunks) {
-            TRACE("-> %s", g_thunks[i].name);
+            TRACE("-> %s esp=%08x ret=%08x", g_thunks[i].name, c->r[4], M32(c->r[4]));
             if (!g_thunks[i].fn)
                 rt_fatal("unimplemented import %s (called from %08x)", g_thunks[i].name, M32(c->r[4]));
             g_thunks[i].fn(c);
+            TRACE("<- %s esp=%08x", g_thunks[i].name, c->r[4]);
             return;
         }
     }

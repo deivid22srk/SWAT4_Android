@@ -213,6 +213,32 @@ def explore_function(start):
                 if op.type == x86.X86_OP_MEM and op.mem.base == 0 and op.mem.index == 0 \
                         and (op.mem.disp & 0xFFFFFFFF) in iat:
                     break  # tail call to import
+                # MSVC's memcpy/strcpy Duff's device: `add reg, base; jmp reg`
+                # where base points just past a run of one-byte movsd/movsb.
+                # Record the 16 entry points as blocks of this function so the
+                # lifter's dispatch can jump to them instead of calling out.
+                if i.id == x86.X86_INS_JMP and op.type == x86.X86_OP_REG:
+                    reg = i.reg_name(op.reg)
+                    for p in reversed(prev[-4:]):
+                        if p.id != x86.X86_INS_ADD or len(p.operands) != 2:
+                            continue
+                        a, b = p.operands
+                        if a.type != x86.X86_OP_REG or p.reg_name(a.reg) != reg \
+                                or b.type != x86.X86_OP_IMM:
+                            continue
+                        base = b.imm & 0xFFFFFFFF
+                        tgts = []
+                        for k in range(1, 17):
+                            t = base - k
+                            if in_text(t) and img[t - BASE] in (0xA5, 0xA4):
+                                tgts.append(t)
+                        if len(tgts) >= 8:
+                            jump_tables[i.address] = tgts
+                            for t in tgts:
+                                if t not in leaders:
+                                    leaders.add(t)
+                                    work.append(t)
+                        break
                 indirect_jumps.append(i.address)
                 break
             a = nxt

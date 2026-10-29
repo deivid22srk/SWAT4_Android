@@ -1,0 +1,32 @@
+info:  Game: lb
+info:  DXVK: v1.9.2
+info:  Built-in extension providers:
+info:    SDL2 WSI
+info:  Enabled instance extensions:
+info:    VK_KHR_get_surface_capabilities2
+info:    VK_KHR_surface
+info:    VK_KHR_xlib_surface
+info:  D3D9: VK_FORMAT_D16_UNORM_S8_UINT -> VK_FORMAT_D24_UNORM_S8_UINT
+info:  llvmpipe (LLVM 20.1.2, 256 bits):
+info:    Driver: 25.2.8
+info:    Vulkan: 1.4.318
+info:    Memory Heap[0]: 
+info:      Size: 15993 MiB
+info:      Flags: 0x1
+info:      Memory Type[0]: Property Flags = 0xf
+info:  Game: lb
+info:  DXVK: v1.9.2
+info:  Built-in extension providers:
+info:    SDL2 WSI
+info:  Enabled instance extensions:
+info:    VK_KHR_get_surface_capabilities2
+info:    VK_KHR_surface
+info:    VK_KHR_xlib_surface
+info:  D3D9: VK_FORMAT_D16_UNORM_S8_UINT -> VK_FORMAT_D24_UNORM_S8_UINT
+info:  llvmpipe (LLVM 20.1.2, 256 bits):
+info:    Driver: 25.2.8
+info:    Vulkan: 1.4.318
+info:    Memory Heap[0]: 
+info:      Size: 15993 MiB
+info:      Flags: 0x1
+info:      Memory Type[0]: Property Flags = 0xf

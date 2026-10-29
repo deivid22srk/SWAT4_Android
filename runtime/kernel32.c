@@ -467,6 +467,22 @@ SHIM(WaitForMultipleObjectsEx) {
     RET(wait_objects(n, (const uint32_t *)(MEM + ARG(1)), ARG(2), ARG(3)), 5);
 }
 
+/* Public helpers used by the wide-char shims (runtime/swat4_shims.c). */
+uint32_t k32_create_event(int manual, int initial) {
+    Waitable *w = w_new(H_EVENT);
+    w->manual = manual;
+    w->signaled = initial;
+    return h_new(H_EVENT, w);
+}
+uint32_t k32_create_mutex(int initial) {
+    Waitable *w = w_new(H_MUTEX);
+    if (initial) { w->owner = cur_tid(); w->recursion = 1; }
+    return h_new(H_MUTEX, w);
+}
+uint32_t k32_wait_object(uint32_t h, uint32_t ms) {
+    return wait_objects(1, &h, 0, ms);
+}
+
 /* ===================== files ===================== */
 char g_last_cache_miss[64]; /* newest missing CachedShaders file: the shader about to be compiled */
 typedef struct { int fd; char path[1024]; } GFile;
@@ -946,6 +962,7 @@ SHIM(HeapAlloc) {
     uint32_t n = ARG(2);
     int id = pheap_id(ARG(0));
     uint32_t p = id >= 0 ? pheap_alloc(id, n ? n : 1) : gmalloc(n ? n : 1);
+    if (n > 0x10000) LOG("HeapAlloc(%u) = %08x", n, p);
     if (p && (ARG(1) & 8)) memset(MEM + p, 0, n);
     RET(p, 3);
 }
@@ -1139,7 +1156,7 @@ static int module_absent(const char *n) {
 }
 SHIM(GetModuleHandleA) {
     const char *n = GSTR(ARG(0));
-    if (!n) RET(GUEST_IMAGE_BASE, 1);
+    if (!n) RET(GAME_EXE_BASE, 1);
     if (module_absent(n)) RET(0, 1);
     if (module_base(n)) RET(module_base(n), 1);
     RET(pseudo_module(n), 1);
@@ -1167,6 +1184,15 @@ static uint32_t pseudo_module(const char *n) {
     return h;
 }
 static uint32_t load_library(const char *n) {
+    char name[64];
+    const char *p = strrchr(n, '\\');
+    p = p ? p + 1 : n;
+    snprintf(name, sizeof name, "%s", p);
+    /* A recompiled module is mapped at start-up but its DllMain must run only
+     * when the game loads it (after appInit has created GMalloc). */
+    extern uint32_t rt_ensure_dll_init(CPU *, const char *);
+    uint32_t b = rt_ensure_dll_init(rt_current_cpu(), name);
+    if (b) return b;
     if (module_base(n)) return module_base(n);
     TRACE("LoadLibrary(%s)", n);
     if (module_absent(n)) return 0;
@@ -1180,6 +1206,14 @@ SHIM(LoadLibraryW) {
     for (; i < 259 && M16(s + 2 * i); i++) buf[i] = (char)M16(s + 2 * i);
     buf[i] = 0;
     RET(load_library(buf), 1);
+}
+SHIM(LoadLibraryExW) {
+    char buf[260];
+    uint32_t s = ARG(0);
+    int i = 0;
+    for (; i < 259 && M16(s + 2 * i); i++) buf[i] = (char)M16(s + 2 * i);
+    buf[i] = 0;
+    RET(load_library(buf), 3);
 }
 SHIM(FreeLibrary) { RET(1, 1); }
 SHIM(GetProcAddress) {
@@ -1450,7 +1484,7 @@ static uint32_t res_find_in(uint32_t rsrc, uint32_t dir, uint32_t id, int wide) 
     return 0xFFFFFFFFu;
 }
 static uint32_t find_resource(uint32_t hmod, uint32_t name, uint32_t type, int wide) {
-    uint32_t base = hmod && hmod >= 0x10000 && module_name_of(hmod) ? hmod : GUEST_IMAGE_BASE;
+    uint32_t base = hmod && hmod >= 0x10000 && module_name_of(hmod) ? hmod : GAME_EXE_BASE;
     uint32_t pe = base + M32(base + 0x3C);
     uint32_t rva = M32(pe + 24 + 112);
     if (!rva) return 0;
@@ -1475,7 +1509,7 @@ SHIM(FindResourceW) {
 }
 SHIM(LoadResource) {
     uint32_t hmod = ARG(0), r = ARG(1);
-    uint32_t base = hmod && module_name_of(hmod) ? hmod : GUEST_IMAGE_BASE;
+    uint32_t base = hmod && module_name_of(hmod) ? hmod : GAME_EXE_BASE;
     RET(r ? base + M32(r) : 0, 2);
 }
 SHIM(LockResource) { RET(ARG(0), 1); }
@@ -1695,7 +1729,7 @@ SHIM(GetModuleFileNameW) {
     RET(i, 3);
 }
 SHIM(GetModuleHandleW) {
-    if (!ARG(0)) RET(GUEST_IMAGE_BASE, 1);
+    if (!ARG(0)) RET(GAME_EXE_BASE, 1);
     call_narrowed(c, shim_GetModuleHandleA, 1);
 }
 SHIM(GetStartupInfoW) {
@@ -1844,7 +1878,7 @@ void k32_init(void) {
     /* command line, environment, PEB */
     uint32_t m = GUEST_MISC_BASE;
     memset(MEM + m, 0, 0x10000);
-    M32(m + 8) = GUEST_IMAGE_BASE;          /* PEB.ImageBaseAddress */
+    M32(m + 8) = GAME_EXE_BASE;          /* PEB.ImageBaseAddress */
     g_cmdline = m + 0x1000;
     strcpy((char *)MEM + g_cmdline, "\"" GAME_WIN_DIR "\\" GAME_EXE "\"");
     g_env = m + 0x1100;                     /* "A=B\0\0" */

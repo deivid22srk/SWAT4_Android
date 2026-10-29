@@ -2,6 +2,7 @@
  * The _CI* math helpers use the x87 register calling convention. */
 #define _GNU_SOURCE
 #include <unistd.h>
+#include <sys/stat.h>
 #include "rt.h"
 #include <ctype.h>
 #include <setjmp.h>
@@ -189,12 +190,114 @@ SHIM(_write) {
 }
 SHIM(_lseeki64) { c->r[2] = 0xFFFFFFFFu; RETC(0xFFFFFFFFu); }
 SHIM(_fileno) { RETC(2); }
-SHIM(fread) { RETC(0); }
+/* A guest FILE* is a 16-byte cell holding the host FILE*. MSVCR71's stdio is
+ * not recompiled, so every stdio call arrives here. */
+#define CRTFILE_MAGIC 0x4346544Cu
+typedef struct { uint64_t h; uint32_t magic; } CFile;
+static FILE *cf(uint32_t p) {
+    if (!p) return NULL;
+    CFile *f = (CFile *)(MEM + p);
+    return f->magic == CRTFILE_MAGIC ? (FILE *)(uintptr_t)f->h : NULL;
+}
+static uint32_t mkcf(FILE *h) {
+    if (!h) return 0;
+    uint32_t p = gmalloc(sizeof(CFile));
+    CFile *f = (CFile *)(MEM + p);
+    f->h = (uint64_t)(uintptr_t)h;
+    f->magic = CRTFILE_MAGIC;
+    return p;
+}
+static void w2a_local(uint32_t w, char *out, size_t n) {
+    size_t i = 0;
+    if (!n) return;
+    if (!w) { out[0] = 0; return; }
+    for (; i + 1 < n && M16(w + 2 * i); i++) out[i] = (char)M16(w + 2 * i);
+    out[i] = 0;
+}
+SHIM(fopen) {
+    char host[1024];
+    rt_host_path(GSTR(ARG(0)), host, sizeof host);
+    RETC(mkcf(fopen(host, GSTR(ARG(1)) ? GSTR(ARG(1)) : "rb")));
+}
+SHIM(_wfopen) {
+    char path[1024], mode[16], host[1024];
+    w2a_local(ARG(0), path, sizeof path);
+    w2a_local(ARG(1), mode, sizeof mode);
+    rt_host_path(path, host, sizeof host);
+    RETC(mkcf(fopen(host, mode[0] ? mode : "rb")));
+}
+SHIM(fclose) {
+    FILE *h = cf(ARG(0));
+    int r = h ? fclose(h) : -1;
+    if (h) gfree(ARG(0));
+    RETC(r);
+}
+SHIM(fread) {
+    FILE *h = cf(ARG(3));
+    RETC(h ? fread(MEM + ARG(0), ARG(1), ARG(2), h) : 0);
+}
 SHIM(fwrite) {
+    FILE *h = cf(ARG(3));
+    if (h) { RETC(fwrite(MEM + ARG(0), ARG(1), ARG(2), h)); }
     fwrite(MEM + ARG(0), ARG(1), ARG(2), stderr);
     RETC(ARG(2));
 }
-SHIM(fflush) { RETC(0); }
+SHIM(fseek) { FILE *h = cf(ARG(0)); RETC(h ? fseek(h, (long)(int32_t)ARG(1), ARG(2)) : -1); }
+SHIM(ftell) { FILE *h = cf(ARG(0)); RETC(h ? (uint32_t)ftell(h) : 0xFFFFFFFFu); }
+SHIM(fgetc) { FILE *h = cf(ARG(0)); RETC(h ? (uint32_t)fgetc(h) : 0xFFFFFFFFu); }
+SHIM(rewind) { FILE *h = cf(ARG(0)); if (h) rewind(h); RETC(0); }
+SHIM(fflush) { FILE *h = cf(ARG(0)); RETC(fflush(h)); }
+SHIM(remove) {
+    char host[1024];
+    rt_host_path(GSTR(ARG(0)), host, sizeof host);
+    RETC(unlink(host));
+}
+static void fill_stat(uint32_t out, struct stat *st) {
+    memset(MEM + out, 0, 32);
+    M16(out + 8) = (uint16_t)(S_ISDIR(st->st_mode) ? 0040755 : 0100644);
+    M32(out + 20) = (uint32_t)st->st_size;
+    M32(out + 24) = (uint32_t)st->st_atime;
+    M32(out + 28) = (uint32_t)st->st_mtime;
+}
+SHIM(_stat) {
+    char host[1024];
+    struct stat st;
+    rt_host_path(GSTR(ARG(0)), host, sizeof host);
+    if (stat(host, &st)) RETC(-1);
+    fill_stat(ARG(1), &st);
+    RETC(0);
+}
+SHIM(_wstat) {
+    char path[1024], host[1024];
+    struct stat st;
+    w2a_local(ARG(0), path, sizeof path);
+    rt_host_path(path, host, sizeof host);
+    if (stat(host, &st)) RETC(-1);
+    fill_stat(ARG(1), &st);
+    RETC(0);
+}
+SHIM(_fstat) {
+    struct stat st;
+    FILE *h = cf(ARG(0));
+    if (!h || fstat(fileno(h), &st)) RETC(-1);
+    fill_stat(ARG(1), &st);
+    RETC(0);
+}
+SHIM(fprintf) {
+    char buf[4096];
+    size_t n = guest_vformat(buf, sizeof buf - 1, GSTR(ARG(1)), c->r[4] + 12);
+    FILE *h = cf(ARG(0));
+    fwrite(buf, 1, n, h ? h : stderr);
+    RETC(n);
+}
+SHIM(printf) {
+    char buf[4096];
+    size_t n = guest_vformat(buf, sizeof buf - 1, GSTR(ARG(0)), c->r[4] + 8);
+    fwrite(buf, 1, n, stdout);
+    fflush(stdout);
+    RETC(n);
+}
+SHIM(fscanf) { LOG("fscanf(%s) not implemented", GSTR(ARG(1)) ? GSTR(ARG(1)) : "?"); RETC(0); }
 SHIM(_tempnam) { RETC(0); }
 
 /* ---------------- process / CRT plumbing ---------------- */
@@ -227,7 +330,11 @@ SHIM(_clearfp) { RETC(0); }
 SHIM(_controlfp) { RETC(0x0009001Fu); }
 
 /* ---------------- memory ---------------- */
-SHIM(malloc_) { RETC(gmalloc(ARG(0) ? ARG(0) : 1)); }
+SHIM(malloc_) {
+    uint32_t n = ARG(0) ? ARG(0) : 1, p = gmalloc(n);
+    if (n > 0x10000) LOG("malloc(%u) = %08x", n, p);
+    RETC(p);
+}
 SHIM(calloc_) {
     uint32_t n = ARG(0) * ARG(1);
     uint32_t p = gmalloc(n ? n : 1);
@@ -403,7 +510,9 @@ SHIM(_vsnwprintf) {
 static const ShimDef defs[] = {
 #define S(n) {"msvcrt.dll", #n, shim_##n},
 #define S2(n, f) {"msvcrt.dll", n, shim_##f},
-    S(_snprintf) S(_vsnprintf) S(sscanf) S(_isatty) S(_write) S(_lseeki64) S(_fileno) S(fread) S(fwrite)
+    S(_snprintf) S(_vsnprintf) S(sscanf) S(_isatty) S(_write) S(_lseeki64) S(_fileno)
+    S(fopen) S(_wfopen) S(fclose) S(fseek) S(ftell) S(fgetc) S(rewind) S(remove)
+    S(_stat) S(_wstat) S(_fstat) S(fprintf) S(printf) S(fscanf) S(fread) S(fwrite)
     S(fflush) S(_tempnam) S(_onexit) S(__dllonexit) S(_lock) S(_unlock) S(_amsg_exit) S(_initterm)
     S(_XcptFilter) S2("?terminate@@YAXXZ", terminate) S2("abort", abort_) S2("exit", exit_) S(_purecall)
     S(_CxxThrowException) S(__CxxFrameHandler) S2("??1type_info@@UAE@XZ", type_info_dtor) S(_errno)

@@ -104,9 +104,60 @@ privada.
 
 **Não instalado / não executado**: não há aparelho Android neste ambiente.
 
+## Teste no aparelho (relatado pelo usuário, 2026-10-29)
+
+O usuário instalou o APK completo e abriu o jogo. O launcher funcionou e o jogo
+começou a executar. Parou em:
+
+```
+unimplemented import MSVCR71!wcslen (called from 010611f1)
+```
+
+Log completo: <https://pastebin.com/raw/NcWki3sC>. Ele mostra os **33 módulos
+carregando nos endereços previstos**, o `Swat4.exe` em `0x10900000`, o CRT
+chamando `_initterm`/`malloc`, e o primeiro import sem shim em `Core.dll`.
+
+## Teste desktop (x86-64, este ambiente)
+
+Compilado `desktop/build.sh` (mesmo `gen/`, `runtime/`, dxvk-native) → `build/lb`
+(63 MB). Executado sob `Xvfb` + Vulkan lavapipe (llvmpipe), sem GPU:
+
+```sh
+XDG_RUNTIME_DIR=/tmp/xdg \
+VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json LB_LOG=2 \
+xvfb-run -a -s "-screen 0 1280x720x24" ./build/lb "/caminho/SWAT 4"
+```
+
+Progresso observado, em ordem, ao longo das iterações:
+
+1. `MSVCR71!wcslen` (o mesmo bloqueio do celular) — implementado o lote wide-char.
+2. "Called appMalloc before memory init" em `AllocateNameEntry` — causa: todos os
+   `DllMain` rodavam antes do `appInit`. Corrigido: só o *closure* estático do
+   exe é inicializado antes do entry; o resto vai por `LoadLibrary(A/W/ExW)`.
+3. `__set_app_type`/`__p__commode`/`_cexit` — plumbing do CRT implementado.
+4. `FindWindowExA`, splash/dialogs, menus — stubs seguros.
+5. `memcpy` com Duff's device (`jmp ecx` para o meio de `movsd`) em `Swat4.exe`
+   e `Core.dll` — corrigido no **discovery** (reconhece `add reg, imm; jmp reg`
+   e adiciona os 16 alvos como blocos) + overrides de `appStrcpy`/`appMemmove`/
+   `appMemset`/`appMemcmp`.
+6. `GetModuleHandle(NULL)` devolvia `0x00400000` em vez de `0x10900000` —
+   corrigido para `GAME_EXE_BASE`.
+
+Estado final do desktop: o jogo carrega todos os módulos, executa `appInit`,
+inicializa o **D3D9 via DXVK v1.9.2** (`Driver: 25.2.8`), grava `S.ini` e sai
+com `exit(0)` — **sem crash**. `Swat4.log` fica vazio e não há chamada a
+`GetMessage`/`PeekMessage` antes da saída. **Não chegou ao menu principal**; a
+causa da saída limpa ainda não foi identificada (próximo passo: hook em
+`FOutputDevice::Logf` e no retorno de `WinMain`).
+
+Correções desta sessão estão no código (`runtime/swat4_shims.c`,
+`runtime/main.c`, `runtime/kernel32.c`, `runtime/msvcrt.c`,
+`runtime/dispatch.c`, `tools/discover.py`, `tools/lift.py`).
+
 ## Não testado de jeito nenhum
 
-* Instalação, UI do launcher, checagem de SHA-1 e Vulkan/dxvk num aparelho.
+* Instalação/launcher num aparelho controlado por mim (o usuário testou; eu
+  não tenho o aparelho para reproduzir).
 * Qualquer gameplay, inclusive o menu principal.
 * Áudio OpenAL, Bink, input físico e overlay de toque.
 * `tools/difftest.py` (lifted vs. unicorn) contra o SWAT 4.

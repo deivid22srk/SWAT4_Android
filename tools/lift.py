@@ -107,7 +107,21 @@ HOST_OVERRIDES_WOS = {
 # tools/swat4_modules.py). Empty for now; add an address here only after it is
 # verified against the supported exe (docs/RECON.md). The runtime must then
 # define f_<addr> and the lifter emits f_<addr>_guest for the original body.
-HOST_OVERRIDES_SWAT4 = {}
+HOST_OVERRIDES_SWAT4 = {
+    # Swat4.exe 0x10903FA0: memcpy implemented with MMX + a Duff's-device
+    # `jmp ecx` into the middle of a run of `movsd`. The static lifter cannot
+    # represent those mid-instruction targets, so the runtime supplies a real
+    # memmove (void f_10903FA0 in runtime/swat4_shims.c).
+    "exe": {0x10903FA0},
+    # Core.dll exported CRT wrappers that tail-jump into the middle of an MMX
+    # memcpy's Duff's device (0x1008E10). Their normal signatures are easy to
+    # implement on the host; overriding the wrappers keeps the odd register
+    # entry out of the lifted code.
+    "core": {0x100270C,  # ?appStrcpy@@YAPAGPAGPBG@Z
+             0x10018E8,  # ?appMemmove@@YAPAXPAXPBXH@Z
+             0x10015F5,  # ?appMemset@@YAXPAXHH@Z
+             0x100276B}, # ?appMemcmp@@YAHPBX0H@Z
+}
 # LIFT_GAME selects the overrides table: swat4 (default), wos, marvel or batman.
 _GAME = os.environ.get("LIFT_GAME", "swat4")
 HOST_OVERRIDES = {"marvel": HOST_OVERRIDES_MARVEL, "batman": HOST_OVERRIDES_BATMAN,
