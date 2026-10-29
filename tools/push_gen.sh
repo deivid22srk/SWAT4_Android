@@ -12,7 +12,7 @@ GEN_REPO=${GEN_REPO:-deivid22srk/SWAT4_codegen}
 GEN_TAG=${GEN_TAG:-gen-v1}
 
 [ -d gen ] || { echo "no gen/ here; run tools/regen_gen.sh first" >&2; exit 1; }
-[ -n "$(find gen -name '*.c' -print -quit)" ] || { echo "gen/ has no .c files" >&2; exit 1; }
+[ -n "$(find -L gen -name '*.c' -print -quit)" ] || { echo "gen/ has no .c files" >&2; exit 1; }
 
 # Refuse anything that is not a private repository. If the lookup fails, stop:
 # we cannot prove the destination is private, and a wrong push is irreversible.
@@ -26,7 +26,7 @@ fi
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 tar --zstd -cf "$tmp/gen.tar.zst" -C gen .
-echo "archive: $(du -h "$tmp/gen.tar.zst" | cut -f1), $(find gen -name '*.c' | wc -l) C files"
+echo "archive: $(du -h "$tmp/gen.tar.zst" | cut -f1), $(find -L gen -name '*.c' | wc -l) C files"
 sha256sum "$tmp/gen.tar.zst"
 
 gh release view "$GEN_TAG" --repo "$GEN_REPO" >/dev/null 2>&1 || \
