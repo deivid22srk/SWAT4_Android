@@ -139,6 +139,7 @@ uint32_t d3d9_wrap(void *host, int iface) {
 
 // ---------------------------------------------------------------- structs
 extern "C" int touch_available(void);
+extern "C" void touch_draw(void *d);
 
 static void pp_from_guest(uint32_t g, D3DPRESENT_PARAMETERS *pp) {
     memset(pp, 0, sizeof *pp);
@@ -371,7 +372,6 @@ void B_IDirect3DDevice9_Present(CPU *c) {
     g_frame++;
     g_d3d_trace = g_frame >= g_trace_from && g_frame <= g_trace_to;
     if (g_d3d_trace) fprintf(stderr, "D3D %d Present\n", g_frame);
-    extern void touch_draw(IDirect3DDevice9 *d);
     touch_draw(d);
     HRESULT hr = d->Present((const RECT *)GPTR(ARG(1)), (const RECT *)GPTR(ARG(2)), nullptr,
                             (const RGNDATA *)GPTR(ARG(4)));
