@@ -1,0 +1,40 @@
+# Generated from the game's executable: never commit (see docs/RECON.md)
+/gen
+/analysis
+/gen/
+/analysis/
+# The user's game files sit next to the repo during development.
+# Never commit the install, the archive, or anything extracted from them.
+/SWAT 4/
+/sw4.rar
+/pc/
+/_CommonRedist/
+Read_Me_Instructions.txt
+*.url
+# Game files
+*.DAT
+*.dat
+*.exe
+*.dll
+*.bik
+*.bcn
+*.PCPACK
+*.bnk
+*.wav
+*.ico
+# Shader cache and saves copied off a phone
+CachedShaders/
+save/
+# Your own exe and DLLs, if kept next to the repo
+GAME/
+# Build outputs (APKs go on GitHub Releases as assets, not in git)
+*.apk
+*.aab
+/build/
+android/.gradle/
+android/build/
+android/app/build/
+android/app/.cxx/
+android/local.properties
+tools/__pycache__/
+desktop/build/

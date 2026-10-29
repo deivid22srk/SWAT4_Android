@@ -1,0 +1,2 @@
+rootProject.name = 'SWAT4'
+include ':app'
