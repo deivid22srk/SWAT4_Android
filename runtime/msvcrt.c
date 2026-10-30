@@ -108,6 +108,71 @@ size_t guest_vformat(char *out, size_t cap, const char *fmt, uint32_t argp) {
     return n;
 }
 
+/* Wide-format helper: converts the guest WIDE format to narrow (flipping
+ * %s<->%S so guest_vformat reads the WIDE arguments the wide printf family
+ * passes) and formats into a host ANSI buffer. The result still needs to be
+ * widened back into the guest buffer by the caller. */
+size_t guest_vwfmt(char *out, size_t cap, uint32_t wf, uint32_t argp) {
+    char fmt[8192];
+    size_t k = 0;
+    uint32_t i = 0;
+    while (M16(wf + 2 * i) && k < sizeof fmt - 8) {
+        uint16_t ch = M16(wf + 2 * i);
+        if (ch != '%') { fmt[k++] = (char)(ch < 256 ? ch : '?'); i++; continue; }
+        fmt[k++] = '%';
+        i++;
+        /* flags */
+        for (;;) {
+            uint16_t c = M16(wf + 2 * i);
+            if (c == '-' || c == '+' || c == ' ' || c == '#' || c == '0') { fmt[k++] = (char)c; i++; continue; }
+            break;
+        }
+        /* width */
+        if (M16(wf + 2 * i) == '*') {
+            k += snprintf(fmt + k, sizeof fmt - k, "%d", (int32_t)M32(argp)); argp += 4; i++;
+        } else {
+            while (M16(wf + 2 * i) >= '0' && M16(wf + 2 * i) <= '9') { fmt[k++] = (char)M16(wf + 2 * i); i++; }
+        }
+        /* precision */
+        if (M16(wf + 2 * i) == '.') {
+            fmt[k++] = '.'; i++;
+            if (M16(wf + 2 * i) == '*') {
+                k += snprintf(fmt + k, sizeof fmt - k, "%d", (int32_t)M32(argp)); argp += 4; i++;
+            } else {
+                while (M16(wf + 2 * i) >= '0' && M16(wf + 2 * i) <= '9') { fmt[k++] = (char)M16(wf + 2 * i); i++; }
+            }
+        }
+        /* size modifiers ('w' means wide like 'l') */
+        for (;;) {
+            uint16_t c = M16(wf + 2 * i);
+            if (c == 'l' || c == 'h' || c == 'L') { fmt[k++] = (char)c; i++; continue; }
+            if (c == 'w') { fmt[k++] = 'l'; i++; continue; }
+            if (c == 'I' && M16(wf + 2 * (i + 1)) == '6' && M16(wf + 2 * (i + 2)) == '4') {
+                fmt[k++] = 'I'; fmt[k++] = '6'; fmt[k++] = '4'; i += 3; continue;
+            }
+            if (c == 'I' || c == 'j' || c == 'z' || c == 't') { i++; continue; }
+            break;
+        }
+        /* conversion — flip s/S (wide printf %s takes a WIDE string) */
+        uint16_t c = M16(wf + 2 * i);
+        if (!c) break;
+        if (c == 's') c = 'S'; else if (c == 'S') c = 's';
+        fmt[k++] = (char)(c < 256 ? c : '?');
+        i++;
+    }
+    fmt[k] = 0;
+    return guest_vformat(out, cap, fmt, argp);
+}
+
+/* Widen a host ANSI buffer into the guest wide buffer (with NUL room). */
+size_t widen_to_guest(uint32_t out, uint32_t cap, const char *src, size_t len) {
+    if (!out || !cap) return 0;
+    uint32_t o = 0;
+    for (; o < len && o + 1 < cap; o++) M16(out + 2 * o) = (uint8_t)src[o];
+    M16(out + 2 * o) = 0;
+    return o;
+}
+
 static int guest_vscan(const char *str, const char *fmt, uint32_t argp) {
     const char *s = str;
     int assigned = 0;
@@ -323,13 +388,42 @@ SHIM(exit_) { LOG("msvcrt exit(%d)", (int)ARG(0)); fflush(NULL); _exit((int)ARG(
 SHIM(_purecall) { rt_fatal("pure virtual call"); }
 SHIM(_CxxThrowException) {
     uint32_t obj = ARG(0), info = ARG(1);
-    char msg[512];
-    uint32_t mp = 0x11499d0, i = 0;
-    for (; i < 511 && M16(mp + 2 * i); i++) msg[i] = (char)M16(mp + 2 * i);
-    msg[i] = 0;
-    LOG("C++ exception: object=%08x info=%08x ret=%08x int=%d message=%s",
-        obj, info, M32(c->r[4]), obj ? (int)M32(obj) : 0, msg);
-    rt_fatal("C++ exception thrown in recompiled DLL (object %08x, info %08x)", obj, info);
+    /* UE2's fatal path (FOutputDeviceError::Serialize in Swat4.exe and the
+     * appUnwindf helpers) reports errors by throwing a C++ exception that
+     * only the WinMain SEH frame can catch. Lifted code cannot unwind, so
+     * this is the end of the line: dump everything useful first. The full
+     * human-readable reason is in Core.dll's exported GErrorHist buffer
+     * ("appError called: <msg>\r\n\r\nHistory: ...\r\n\r\nWindows
+     * GetLastError: ..."), which Serialize fills before throwing. */
+    char msg[2048];
+    size_t n = 0;
+    uint32_t hist = rt_import_opt("Core.dll", "?GErrorHist@@3PAGA");
+    if (!hist) hist = 0x10F8220; /* Core.dll+0xf8220 in the supported build */
+    for (uint32_t i = 0; i < sizeof msg / 2 - 1 && M16(hist + 2 * i); i++)
+        msg[n++] = (char)M16(hist + 2 * i);
+    msg[n] = 0;
+    if (!n) { /* Serialize not reached (direct appUnwindf throw): try the object */
+        if (obj > 0x10000)
+            for (uint32_t i = 0; i < 256 && M16(obj + 2 * i); i++)
+                msg[n++] = (char)M16(obj + 2 * i);
+        msg[n] = 0;
+    }
+    /* decode the ThrowInfo -> catchable type names (TypeDescriptor names) */
+    const char *tname = "?";
+    if (info && M32(info + 12)) {
+        uint32_t cta = M32(info + 12);
+        uint32_t ntypes = M32(cta);
+        uint32_t ptype = ntypes ? M32(M32(cta + 4) + 4) : 0;
+        if (ptype > 0x10000) tname = (const char *)MEM + ptype + 8;
+        else if (!ntypes) tname = "(no catchable types: UE2 fatal-error unwind)";
+    } else if (info) {
+        tname = "(no catchable types: UE2 fatal-error unwind)";
+    }
+    LOG("C++ exception: object=%08x info=%08x type=%s", obj, info, tname);
+    if (obj) LOG("exception object: %08x %08x %08x %08x", M32(obj), M32(obj + 4), M32(obj + 8), M32(obj + 12));
+    LOG("GErrorHist: %s", n ? msg : "(vazia)");
+    rt_fatal("C++ exception thrown in recompiled DLL (object %08x, info %08x, type %s)%s%s",
+             obj, info, tname, n ? ": " : "", n ? msg : "");
 }
 SHIM(__CxxFrameHandler) { rt_fatal("__CxxFrameHandler invoked"); }
 SHIM(type_info_dtor) { RET(0, 0); } /* thiscall, no stack args */
@@ -503,27 +597,24 @@ SHIM(strstr_) {
 }
 SHIM(getenv_) { RETC(0); }
 SHIM(_mbstrlen) { RETC(strlen(GSTR(ARG(0)))); }
-/* _vsnwprintf(wchar_t *buf, size_t count, const wchar_t *fmt, va_list): the
- * format is narrowed; %s arguments are taken as narrow (only error text). */
+/* _vsnwprintf(wchar_t *buf, size_t count, const wchar_t *fmt, va_list) */
 SHIM(_vsnwprintf) {
-    /* Copy the literal characters of the wide format, dropping conversions.
-     * The callers in Window.dll pass a varargs layout the generic formatter
-     * cannot walk safely; the result is only used for a window/debug name. */
-    uint32_t buf = ARG(0), cap = ARG(1), wf = ARG(2);
+    /* Real wide formatter: (buf, cap, wide fmt, va_list). UE2's GET_VARARGS
+     * macro (appErrorf, debugf, appThrowf...) formats the fatal/log messages
+     * through this shim, so dropping conversions silently corrupted every
+     * error message and several config file names ("Swat4.ini" became
+     * ".ini"). Read the varargs from the caller-provided va_list pointer,
+     * which is a guest stack address. */
+    uint32_t buf = ARG(0), cap = ARG(1), wf = ARG(2), argp = ARG(3);
     if (cap > (1u << 20)) cap = 1u << 20;
-    uint32_t i = 0, o = 0;
-    while (M16(wf + 2 * i) && o + 1 < cap) {
-        uint16_t ch = M16(wf + 2 * i);
-        if (ch == '%') {
-            uint16_t nx = M16(wf + 2 * (i + 1));
-            if (nx == '%') { M16(buf + 2 * o++) = '%'; i += 2; continue; }
-            if (nx) { i += 2; continue; }
-        }
-        M16(buf + 2 * o++) = ch;
-        i++;
-    }
-    M16(buf + 2 * o) = 0;
-    RETC((int32_t)o);
+    if (!buf || !cap || !wf) RETC((uint32_t)-1);
+    char tmp[8192];
+    size_t n = guest_vwfmt(tmp, sizeof tmp - 1, wf, argp);
+    if (n > sizeof tmp - 1) n = sizeof tmp - 1;
+    tmp[n] = 0;
+    size_t w = widen_to_guest(buf, cap, tmp, n);
+    if (n >= cap) RETC((uint32_t)-1); /* MSVC: -1 when it did not fit */
+    RETC((uint32_t)w);
 }
 
 static const ShimDef defs[] = {

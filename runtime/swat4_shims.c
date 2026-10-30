@@ -157,21 +157,25 @@ SHIM(_wstrtime) {
     strftime(b, sizeof b, "%H:%M:%S", &tmv); ga2w(b, ARG(0), 9); RETC(ARG(0));
 }
 SHIM(swprintf) {
-    /* Wide format strings/args are rare in this game; format the narrow text
-     * and widen it. Logged because %s of a wide argument is not supported. */
-    char fmt[512], buf[2048];
-    gw2a(ARG(1), fmt, sizeof fmt);
-    size_t n = guest_vformat(buf, sizeof buf - 1, fmt, c->r[4] + 12);
-    ga2w(buf, ARG(0), 256);
-    RETC(n);
+    /* swprintf(buf, wide fmt, ...): format with WIDE semantics — %s takes a
+     * wide string — then widen into the guest buffer. */
+    char buf[4096];
+    size_t n = guest_vwfmt(buf, sizeof buf - 1, ARG(1), c->r[4] + 12);
+    if (n > sizeof buf - 1) n = sizeof buf - 1;
+    buf[n] = 0;
+    RETC((uint32_t)widen_to_guest(ARG(0), 4096, buf, n));
 }
 SHIM(_snwprintf) {
-    char fmt[512], buf[2048];
-    gw2a(ARG(2), fmt, sizeof fmt);
-    size_t n = guest_vformat(buf, sizeof buf - 1, fmt, c->r[4] + 16);
-    if (n > ARG(1)) n = ARG(1);
-    ga2w(buf, ARG(0), ARG(1) ? ARG(1) : 1);
-    RETC(n);
+    /* _snwprintf(buf, cap, wide fmt, ...) — same as swprintf with a cap. */
+    uint32_t cap = ARG(1);
+    if (cap > 65536) cap = 65536;
+    if (!cap) RETC((uint32_t)-1);
+    char buf[4096];
+    size_t n = guest_vwfmt(buf, sizeof buf - 1, ARG(2), c->r[4] + 16);
+    if (n > sizeof buf - 1) n = sizeof buf - 1;
+    buf[n] = 0;
+    if (n >= cap) { widen_to_guest(ARG(0), cap, buf, cap - 1); RETC((uint32_t)-1); }
+    RETC((uint32_t)widen_to_guest(ARG(0), cap, buf, n));
 }
 SHIM(swscanf) { LOG("swscanf: not implemented"); RETC(0); }
 
@@ -516,7 +520,11 @@ SHIM(CreateDirectoryW) {
     gw2a(ARG(0), path, sizeof path);
     rt_host_path(path, host, sizeof host);
     int ok = mkdir(host, 0755) == 0;
-    if (!ok && errno == EEXIST) ok = 1;
+    if (!ok && errno == EEXIST) ok = 1; /* Windows reports success for ALREADY_EXISTS users of UE2's MakeDirectory */
+    if (!ok)
+        rt_set_last_error(c, (errno == EACCES || errno == EPERM || errno == EROFS) ? 5 /*ACCESS_DENIED*/
+                                                                                    : 3 /*PATH_NOT_FOUND*/);
+    LOG("CreateDirectoryW(%s) -> %d lasterr=%u", path, ok, ok ? 0 : (errno == EACCES ? 5 : 3));
     RET(ok, 2);
 }
 SHIM(RemoveDirectoryW) {

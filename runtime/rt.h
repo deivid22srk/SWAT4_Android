@@ -29,6 +29,12 @@ extern int g_log_level;
 #define TRACE(...) do { if (g_log_level > 1) { fprintf(stderr, __VA_ARGS__); fputc('\n', stderr); } } while (0)
 void rt_fatal(const char *fmt, ...) __attribute__((noreturn, format(printf, 1, 2)));
 
+/* ---- wide printf support (msvcrt.c; used by swprintf/_snwprintf too) ----
+ * guest_vwfmt formats a guest WIDE format (with WIDE args at argp) into a
+ * host ANSI buffer, flipping %s/%S as the wide printf family requires. */
+size_t guest_vwfmt(char *out, size_t cap, uint32_t wf, uint32_t argp);
+size_t widen_to_guest(uint32_t out, uint32_t cap, const char *src, size_t len);
+
 /* ---- shims ---- */
 typedef void (*ShimFn)(CPU *c);
 typedef struct { const char *dll; const char *name; ShimFn fn; } ShimDef;

@@ -29,6 +29,7 @@ SHIM(UpdateWindow) { RET(1, 1); }
 SHIM(MoveWindow) { RET(1, 6); }
 SHIM(SetForegroundWindow) { RET(1, 1); }
 SHIM(GetForegroundWindow) { RET(FAKE_HWND, 0); }
+SHIM(GetDesktopWindow) { RET(0x00010000u, 0); } /* desktop pseudo-HWND */
 SHIM(IsIconic) { RET(0, 1); }
 SHIM(GetWindowLongA) { RET(0x10000000u | 0x00C00000u, 2); } /* WS_VISIBLE | WS_CAPTION */
 SHIM(AdjustWindowRect) { RET(1, 3); }
@@ -258,7 +259,7 @@ SHIM(EnumDisplayMonitors) {
 static const ShimDef defs[] = {
 #define S(n) {"USER32.dll", #n, shim_##n},
     S(RegisterClassExA) S(CreateWindowExA) S(DestroyWindow) S(ShowWindow) S(UpdateWindow) S(MoveWindow)
-    S(SetForegroundWindow) S(GetForegroundWindow) S(IsIconic) S(GetWindowLongA) S(AdjustWindowRect)
+    S(SetForegroundWindow) S(GetForegroundWindow) S(GetDesktopWindow) S(IsIconic) S(GetWindowLongA) S(AdjustWindowRect)
     S(GetSystemMetrics) S(SystemParametersInfoA) S(LoadIconA) S(LoadCursorA) S(SetCursor) S(SetCursorPos)
     S(ShowCursor) S(LoadKeyboardLayoutA) S(MapVirtualKeyExA) S(PeekMessageA) S(TranslateMessage)
     S(DispatchMessageA) S(SendMessageA) S(PostQuitMessage) S(DefWindowProcA) S(MessageBoxA) S(MessageBoxW)

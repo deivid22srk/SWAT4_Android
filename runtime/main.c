@@ -206,6 +206,33 @@ static void on_crash(int sig, siginfo_t *si, void *uc) {
             (unsigned long long)g[REG_RDX], (unsigned long long)g[REG_RBX],
             (unsigned long long)g[REG_RSI], (unsigned long long)g[REG_RDI]);
     fprintf(stderr, "  fault = MEM %+td\n", (uint8_t *)si->si_addr - MEM);
+    {   /* guest call chain: scan the guest stack for code-range words */
+        CPU *c = rt_current_cpu();
+        if (c && MEM) {
+            uint32_t sp = c->r[4];
+            fprintf(stderr, "  guest esp=%08x ecx=%08x esi=%08x edi=%08x\n", sp, c->r[1], c->r[6], c->r[7]);
+            fprintf(stderr, "  guest stack:");
+            for (int i = 0; i < 220; i++) {
+                uint32_t v = M32(sp + 4 * i);
+                int core = v >= 0x1000000 && v < 0x12b3000;
+                int exe = v >= 0x10900000 && v < 0x10950000;
+                int eng = v >= 0x1400000 && v < 0x1c29000;
+                int sga = v >= 0x3200000 && v < 0x32c3000;
+                if (core || exe || eng || sga) fprintf(stderr, " %08x", v);
+            }
+            fputc('\n', stderr);
+            /* dump the this/struct objects the crashing frame was touching */
+            if (c->r[6] > 0x10000 && c->r[6] < 0x40000000u) {
+                uint32_t a = M32(c->r[6]);
+                fprintf(stderr, "  [esi]=%08x [esi+4]=%08x\n", a, M32(c->r[6] + 4));
+                if (a > 0x10000 && a < 0x40000000u) {
+                    fprintf(stderr, "  obj at %08x:", a);
+                    for (int i = 0; i < 12; i++) fprintf(stderr, " %08x", M32(a + 4 * i));
+                    fputc('\n', stderr);
+                }
+            }
+        }
+    }
 #endif
     void *bt[64];
     int n = backtrace(bt, 64);
@@ -368,16 +395,54 @@ int rt_dll_index(const char *name) {
      * library as DefOpenAL32.dll (the "Def" driver copy). */
     if (!strcasecmp(name, "OpenAL32.dll") || !strcasecmp(name, "OpenAL32"))
         name = "DefOpenAL32.dll";
+    /* The game LoadLibrary()s "SwatGame", "Engine", ... without the .dll
+     * extension. Without this normalization the map lookup fails, DllMain is
+     * never run and the DLL's class-registration slots (autoclass*) stay
+     * zero, which crashes UClass::Bind with a NULL class. */
+    static _Thread_local char norm[64];
+    if (!strchr(name, '.')) {
+        snprintf(norm, sizeof norm, "%s.dll", name);
+        name = norm;
+    }
     for (int i = 0; g_dll_modules[i]; i++)
         if (!strcasecmp(g_dll_modules[i], name)) return i;
     return -1;
 }
+uint32_t rt_ensure_dll_init(CPU *c, const char *name);
+
+/* Walks the import table of the mapped PE at `base` and runs cb() for each
+ * imported DLL name, so DllMain can be run in Windows loader order (static
+ * imports first). RWOSupport.dll, GUI.dll & co. are only imported (never
+ * LoadLibrary'd by the game) but their static initializers must still run:
+ * SwatGame's class registration crashed on a never-constructed global of
+ * theirs (vtable still zero). */
+static void for_each_import_dll(uint32_t base, void (*cb)(const char *, void *), void *ud) {
+    uint32_t pe = M32(base + 0x3C);
+    if (M32(base + pe) != 0x4550) return;
+    uint32_t opt = base + pe + 24;
+    uint32_t imp_rva = M32(opt + 104);
+    if (!imp_rva) return;
+    for (uint32_t d = base + imp_rva; M32(d + 12); d += 20) {
+        uint32_t nm_rva = M32(d + 12);
+        char name[64];
+        uint32_t i = 0;
+        for (; i < sizeof name - 1 && M8(base + nm_rva + i); i++) name[i] = (char)M8(base + nm_rva + i);
+        name[i] = 0;
+        cb(name, ud);
+    }
+}
+
+static void init_dep_cb(const char *dll, void *ud) { rt_ensure_dll_init((CPU *)ud, dll); }
+static int g_dll_deps_enabled = 1; /* off while the boot preload list runs */
+
 uint32_t rt_ensure_dll_init(CPU *c, const char *name) {
     int i = rt_dll_index(name);
     if (i < 0) return 0;
     if (!g_dll_inited[i]) {
-        g_dll_inited[i] = 1;
+        g_dll_inited[i] = 1; /* marked first: import graphs can cycle */
+        if (g_dll_deps_enabled) for_each_import_dll(g_dll_bases[i], init_dep_cb, c);
         if (g_dll_entry[i]) {
+            LOG("DllMain(%s)", rt_dll_index(name) >= 0 ? g_dll_modules[rt_dll_index(name)] : name);
             uint32_t args[3] = {g_dll_bases[i], 1, 0};
             rt_invoke(c, g_dll_entry[i], 3, args);
         }
@@ -459,9 +524,11 @@ extern void platform_init(void);
         "IFC23.dll", "IrrSupport.dll", "RenderUtilities.dll",
         "Core.dll", "Engine.dll", "Scripting.dll", "Window.dll",
         "AICommon.dll", "SwatAIAwareness.dll", "ALAudio.dll", NULL};
+    g_dll_deps_enabled = 0; /* preload keeps its tested boot-time behaviour */
     for (int i = 0; k_preload[i]; i++)
         if (!rt_ensure_dll_init(c, k_preload[i]))
             rt_fatal("preload: %s is not in the module map", k_preload[i]);
+    g_dll_deps_enabled = 1;
     /* push a return address that ends the process when main returns */
     c->r[4] -= 4;
     M32(c->r[4]) = 0;

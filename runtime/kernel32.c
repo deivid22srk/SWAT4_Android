@@ -832,6 +832,10 @@ SHIM(CreateDirectoryA) {
     mkdirs_for(host);
     int ok = mkdir(host, 0755) == 0;
     if (!ok && errno == EEXIST) rt_set_last_error(c, ERROR_ALREADY_EXISTS);
+    else if (!ok)
+        rt_set_last_error(c, (errno == EACCES || errno == EPERM || errno == EROFS) ? 5 /*ACCESS_DENIED*/
+                                                                                    : 3 /*PATH_NOT_FOUND*/);
+    LOG("CreateDirectoryA(%s) -> %d", GSTR(ARG(0)), ok);
     RET(ok, 2);
 }
 
@@ -1237,6 +1241,8 @@ SHIM(GetProcAddress) {
      * the recompiled DefOpenAL32.dll (also known as OpenAL32.dll). */
     if (!r && name[0] == 'a' && name[1] == 'l')
         r = rt_import_opt("DefOpenAL32.dll", name);
+    if (!r && (name[0] == 'i' || name[0] == 'U')) /* diag: native binding misses */
+        LOG("GetProcAddress MISS %s!%s (handle %08x, m=%p)", dll, name, ARG(0), (void *)m);
     TRACE("GetProcAddress(%s, %s) = %08x", dll, name, r);
     RET(r, 2);
 }
@@ -1246,6 +1252,61 @@ SHIM(GetModuleFileNameA) {
     snprintf((char *)MEM + ARG(1), n, "%s", p);
     RET(strlen(p) < n ? strlen(p) : n, 3);
 }
+
+/* ===================== atom table (Window.dll uses it for props) ===================== */
+static void k32_gw2a(uint32_t w, char *out, size_t n) {
+    size_t i = 0;
+    if (!n) return;
+    if (!w) { out[0] = 0; return; }
+    for (; i + 1 < n && M16(w + 2 * i); i++) out[i] = (char)M16(w + 2 * i);
+    out[i] = 0;
+}
+static void k32_ga2w(const char *s, uint32_t w, size_t n) {
+    size_t i = 0;
+    if (!w || !n) return;
+    for (; s && s[i] && i + 1 < n; i++) M16(w + 2 * i) = (uint8_t)s[i];
+    M16(w + 2 * i) = 0;
+}
+#define MAX_ATOMS 256
+static struct { int used; char name[256]; } g_atoms[MAX_ATOMS];
+static int atom_slot(const char *name, int add) {
+    for (int i = 0; i < MAX_ATOMS; i++)
+        if (g_atoms[i].used && !strcasecmp(g_atoms[i].name, name)) return i;
+    if (!add) return -1;
+    for (int i = 0; i < MAX_ATOMS; i++)
+        if (!g_atoms[i].used) {
+            g_atoms[i].used = 1;
+            snprintf(g_atoms[i].name, sizeof g_atoms[0].name, "%s", name);
+            return i;
+        }
+    return -1;
+}
+SHIM(GlobalAddAtomA) { const char *s = GSTR(ARG(0)); int i = s ? atom_slot(s, 1) : -1; RET(i < 0 ? 0 : 0xC000u + (uint32_t)i, 1); }
+SHIM(GlobalAddAtomW) {
+    char s[256]; k32_gw2a(ARG(0), s, sizeof s);
+    int i = s[0] ? atom_slot(s, 1) : -1;
+    RET(i < 0 ? 0 : 0xC000u + (uint32_t)i, 1);
+}
+SHIM(GlobalFindAtomA) { const char *s = GSTR(ARG(0)); int i = s ? atom_slot(s, 0) : -1; RET(i < 0 ? 0 : 0xC000u + (uint32_t)i, 1); }
+SHIM(GlobalFindAtomW) {
+    char s[256]; k32_gw2a(ARG(0), s, sizeof s);
+    int i = s[0] ? atom_slot(s, 0) : -1;
+    RET(i < 0 ? 0 : 0xC000u + (uint32_t)i, 1);
+}
+SHIM(GlobalGetAtomNameA) {
+    uint32_t a = ARG(0) & 0xFFFF;
+    const char *s = (a >= 0xC000 && a < 0xC000 + MAX_ATOMS && g_atoms[a - 0xC000].used) ? g_atoms[a - 0xC000].name : "";
+    uint32_t n = ARG(2);
+    if (ARG(1) && n) snprintf((char *)MEM + ARG(1), n, "%s", s);
+    RET((uint32_t)strlen(s), 3);
+}
+SHIM(GlobalGetAtomNameW) {
+    uint32_t a = ARG(0) & 0xFFFF;
+    const char *s = (a >= 0xC000 && a < 0xC000 + MAX_ATOMS && g_atoms[a - 0xC000].used) ? g_atoms[a - 0xC000].name : "";
+    k32_ga2w(s, ARG(1), ARG(2) ? ARG(2) : 1);
+    RET((uint32_t)strlen(s), 3);
+}
+SHIM(GlobalDeleteAtom) { uint32_t a = ARG(0) & 0xFFFF; if (a >= 0xC000 && a < 0xC000 + MAX_ATOMS) g_atoms[a - 0xC000].used = 0; RET(0, 1); }
 
 /* ===================== console ===================== */
 SHIM(GetConsoleCP) { RET(437, 0); }
@@ -1439,7 +1500,11 @@ SHIM(GetTimeFormatA) {
 }
 
 /* ===================== loaded modules ===================== */
-#define MAX_MODS 16
+/* 33+ PE modules are mapped at boot (Swat4.exe and every game DLL); 16
+ * silently dropped the tail of the list, so GetProcAddress by module base
+ * (UE2's native UFunction binding) resolved to Swat4.exe and every
+ * "Can't find 'int<Class>exec<Name>' in '<Dll>'" error followed. */
+#define MAX_MODS 64
 static struct { char name[64]; uint32_t base; } g_mods[MAX_MODS];
 static int g_nmods;
 void rt_module_add(const char *name, uint32_t base) {
@@ -1876,6 +1941,7 @@ static const ShimDef k32[] = {
     S(OutputDebugStringA) S(OutputDebugStringW) S(DebugBreak) S(FatalAppExitA) S(ExitProcess)
     S(TerminateProcess) S(RaiseException) S(RtlUnwind)
     S(GetModuleHandleA) S(GetModuleHandleW) S(LoadLibraryA) S(LoadLibraryW) S(LoadLibraryExW) S(FreeLibrary) S(GetProcAddress) S(GetModuleFileNameA)
+    S(GlobalAddAtomA) S(GlobalAddAtomW) S(GlobalFindAtomA) S(GlobalFindAtomW) S(GlobalGetAtomNameA) S(GlobalGetAtomNameW) S(GlobalDeleteAtom)
     S(GetConsoleCP) S(GetConsoleOutputCP) S(GetConsoleMode) S(WriteConsoleA) S(WriteConsoleW)
     S(GetACP) S(GetOEMCP) S(IsValidCodePage) S(GetCPInfo) S(MultiByteToWideChar) S(WideCharToMultiByte)
     S(GetUserDefaultLCID) S(GetUserDefaultLangID) S(GetUserGeoID) S(IsValidLocale) S(EnumSystemLocalesA)

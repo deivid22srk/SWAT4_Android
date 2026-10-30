@@ -24,7 +24,16 @@ void platform_init(void) {
     if (SDL_GetDesktopDisplayMode(0, &dm) == 0) { w = dm.w; h = dm.h; }
 #endif
     g_window = SDL_CreateWindow(GAME_TITLE, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, w, h, flags);
-    if (!g_window) rt_fatal("SDL_CreateWindow: %s", SDL_GetError());
+    if (!g_window) {
+        /* Headless fallback (CI/desktop sem GPU): tenta de novo sem a
+         * exigência de superfície Vulkan; o D3D9 vai falhar depois e o jogo
+         * segue pelo caminho de erro normal do UE2. */
+        LOG("SDL Vulkan window indisponível (%s); tentando janela headless", SDL_GetError());
+        flags &= ~(Uint32)SDL_WINDOW_VULKAN;
+        flags &= ~(Uint32)SDL_WINDOW_SHOWN;
+        g_window = SDL_CreateWindow(GAME_TITLE, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, w, h, flags);
+        if (!g_window) rt_fatal("SDL_CreateWindow: %s", SDL_GetError());
+    }
     extern void user32_set_screen(int, int);
     user32_set_screen(w, h);
     LOG("platform: window %dx%d", w, h);
