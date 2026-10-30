@@ -597,6 +597,57 @@ SHIM(strstr_) {
 }
 SHIM(getenv_) { RETC(0); }
 SHIM(_mbstrlen) { RETC(strlen(GSTR(ARG(0)))); }
+/* --- assert-site debugging: when the engine formats an appErrorf
+ * "Assertion failed" message, dump the guest call chain so the repeating
+ * Window.cpp:1083 assert can be attributed. Bounded: first 4 hits. --- */
+extern const char *const g_dll_modules[];
+extern const uint32_t g_dll_bases[];
+static int g_assert_dumps;
+static void dump_assert_stack(CPU *c, const char *msg) {
+    if (g_assert_dumps >= 6) return;
+    g_assert_dumps++;
+    uint32_t sp = c->r[4];
+    fprintf(stderr, "ASSERT-DUMP #%d: \"%s\"\n", g_assert_dumps, msg ? msg : "?");
+    fprintf(stderr, "  esp=%08x ret=%08x ebp=%08x ebx=%08x esi=%08x edi=%08x\n",
+            sp, M32(sp), c->r[5], c->r[3], c->r[6], c->r[7]);
+    fprintf(stderr, "  ebpchain:");
+    {   /* real frame walk: ret at [ebp+4], next ebp at [ebp] */
+        uint32_t ebp = c->r[5];
+        for (int i = 0; i < 24 && ebp > sp && ebp < sp + 0x100000; i++) {
+            uint32_t v = M32(ebp + 4);
+            const char *mod = NULL; uint32_t base = 0;
+            if (v >= 0x10900000 && v < 0x10950000) { mod = "Swat4.exe"; base = 0x10900000; }
+            else {
+                for (int m = 0; g_dll_modules[m]; m++) {
+                    uint32_t b = g_dll_bases[m];
+                    if (b && v >= b && v - b < 0x1000000u && b > base) { base = b; mod = g_dll_modules[m]; }
+                }
+            }
+            if (mod) fprintf(stderr, " %s+%x", mod, v - base);
+            uint32_t next = M32(ebp);
+            if (next <= ebp) break;
+            ebp = next;
+        }
+        fputc('\n', stderr);
+    }
+    fprintf(stderr, "  chain:");
+    for (int i = 0; i < 500; i++) {
+        uint32_t v = M32(sp + 4 * i);
+        if (v < 0x10000 || v >= 0x40000000u) continue;
+        const char *mod = NULL; uint32_t base = 0;
+        if (v >= 0x10900000 && v < 0x10950000) { mod = "Swat4.exe"; base = 0x10900000; }
+        else {
+            for (int m = 0; g_dll_modules[m]; m++) {
+                uint32_t b = g_dll_bases[m];
+                if (b && v >= b && v - b < 0x1000000u && b > base) { base = b; mod = g_dll_modules[m]; }
+            }
+        }
+        if (mod) fprintf(stderr, " %s+%x", mod, v - base);
+    }
+    fputc('\n', stderr);
+    fflush(stderr);
+}
+
 /* _vsnwprintf(wchar_t *buf, size_t count, const wchar_t *fmt, va_list) */
 SHIM(_vsnwprintf) {
     /* Real wide formatter: (buf, cap, wide fmt, va_list). UE2's GET_VARARGS
@@ -612,6 +663,8 @@ SHIM(_vsnwprintf) {
     size_t n = guest_vwfmt(tmp, sizeof tmp - 1, wf, argp);
     if (n > sizeof tmp - 1) n = sizeof tmp - 1;
     tmp[n] = 0;
+    if (strstr(tmp, "Assertion failed") || strstr(tmp, "assertion failed"))
+        dump_assert_stack(c, tmp);
     TRACE("  _vsnwprintf -> \"%s\"", tmp);
     size_t w = widen_to_guest(buf, cap, tmp, n);
     if (n >= cap) RETC((uint32_t)-1); /* MSVC: -1 when it did not fit */

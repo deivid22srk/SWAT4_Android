@@ -304,3 +304,94 @@ menu pendente.
 Diagnóstico instrumentado que sustenta a tabela: `_vsnwprintf` agora loga a
 mensagem formatada (`  _vsnwprintf -> "..."` no trace), e o trace do
 FindFirstFileW mostra spec/host de cada varredura.
+
+## 2026-10-30 (tarde) — tela preta do celular (olalog.txt) reproduzida e corrigida no desktop
+
+Ambiente reconstruído após reset do sandbox (clang/cmake/ninja de
+`*.deb` extraídos com `dpkg-deb -x` para `deproot/`; Xvfb + xauth +
+mesa-vulkan lavapipe + `libxkbcommon-x11-0` idem; SDL2 completa
+`libsdl2-2.0-0` porque a do sistema só tem drivers dummy/offscreen —
+sem `libxkbcommon-x11-0` o SDL não escolhe o driver x11 e o DXVK
+exige janela com Vulkan). Xvfb precisa rodar **na mesma chamada** do
+jogo (o sandbox mata processos de fundo entre comandos):
+
+```sh
+Xvfb :99 -screen 0 1280x720x24 -nolisten tcp & XPID=$!; sleep 2
+DISPLAY=:99 LB_LOG=1 ./build/lb "<SWAT 4>"
+kill $XPID
+```
+
+### Reprodução do travamento do celular
+
+O desktop com os shims antigos reproduziu **exatamente** o log
+`olalog.txt` do aparelho: `Assertion failed: hWndCreated==hWnd
+[File:.\Window.cpp] [Line: 1083]` em loop infinito (31 M linhas de log
+em ~100 s). Instrumentei o shim `_vsnwprintf` para despejar a cadeia
+guest (ebp-chain + scan de pilha, módulo+offset) nas 4 primeiras
+assertions — a pilha simbolizada apontou:
+`f_2006990 → f_2028F40 (Window.dll) → CreateWindowExW → check`.
+
+### Causa raiz 1: binding objeto↔HWND
+
+O `WndProc` do jogo (f_2024930) grava o ponteiro do objeto com
+`SetWindowLongPtrW(hwnd, 0, ((CREATESTRUCT*)lp)->lpCreateParams)` no
+WM_NCCREATE e lê de volta no WM_CREATE para fazer `obj->hWnd = hwnd`;
+o `check(hWndCreated==hWnd)` do Window.cpp:1083 compara o retorno de
+`CreateWindowExW` com esse campo. Os shims `Set/GetWindowLongW`
+descartavam tudo → campo sempre 0 → assert → o caminho de erro da
+UE2 reinseria a janela num loop. Correções (`runtime/user32.c`,
+`runtime/swat4_shims.c`):
+
+* **registro de janelas** compartilhado (A/W): HWND único por janela
+  (0x00010001 + 4n), wndproc por hwnd, slots `GWL_*` e class-extra
+  reais em `Set/GetWindowLongA/W` (antes: `GetWindowLongA` devolvia
+  estilo constante e `SetWindowLong` não guardava nada);
+* `CreateWindowExA` (user32.c) entregava WM_NCCREATE/WM_CREATE só na
+  variante W — agora as duas entregam e registram a janela após o
+  WM_CREATE (contrato Win32: `IsWindow` só vira TRUE depois que
+  `CreateWindowEx` retorna);
+* `IsWindow` consulta o registro (era sempre 1 — durante o
+  WM_NCCREATE o wndproc virtual de Window.dll consulta IsWindow e
+  seguia por `CallWindowProc(prevproc=0)` → 0 → "CreateWindowEx
+  failed");
+* `CallWindowProcA/W` novos (encaminham ao guest; prevproc NULL →
+  resposta de DefWindowProc); `DispatchMessageW` despacha ao wndproc
+  do hwnd da mensagem; `PeekMessageA` carrega o hwnd da janela
+  principal; `EnableWindow`/`WindowFromPoint` novos.
+
+### Causa raiz 2: `ShowCursor` sem contador
+
+Após as janelas, o desktop travou num loop infinito de
+`USER32!ShowCursor` vindo de WinDrv.dll+0x55b4: o Win32 ShowCursor
+mantém contador (retorna o novo valor; visível se >= 0) e o WinDrv
+põe o cursor escondido com `while (ShowCursor(FALSE) >= 0)`. O shim
+devolvia constante → loop eterno (a "tela preta" da sessão anterior
+no desktop). Corrigido com contador real.
+
+### Causa raiz 3: IMM32 ausente
+
+`unimplemented import IMM32!ImmAssociateContext` (WinDrv): lote de
+shims IMM32 (contexto fake não-nulo, `ImmGetContext` etc.).
+
+### Estado após as correções (desktop, LB_LOG=1, Xvfb+lavapipe)
+
+* 5 janelas criadas, todas com WM_NCCREATE → 1 e `CreateDevice →
+  00000000` (DXVK 1.9.2, swapchain 1280x720/3 imagens);
+* carregamento de pacotes avança: SwatProcedures.u, SwatObjectives.u,
+  SwatGui.u ("Updating Revision level for <GUID> to 0"), centenas de
+  .int consultados (SwatGame/SwatGui/SwatAmmo/GUI.int);
+* **novo bloqueio (em investigação)**: crash com leitura guest em
+  `0x1190` durante o binding das classes SwatGui — cadeia
+  `f_1090A350 → f_10909770 → (SwatGame) → f_1411BF8/f_1410E38/
+  f_140E755/f_140A187 (Engine) → VM Core (ProcessInternal) ×4 níveis
+  GUI↔VM → f_10903E00 → f_109041A0+0x2e6` — a lookup de FName
+  (`ebx>>24` = bucket em `this+0x25C`, nó em `(byte<<5)+bucket+0x10`)
+  achou bucket vazio onde o Windows tem nó sentinela. O caminho de
+  mensagens antes do crash mostra serialização de defaults de classes
+  GUI ("SaveColor.", "LinkOverrides[n]", "TransitionSpec.",
+  "ClientBounds[n]").
+
+Instrumentação mantida (com limites): dump de cadeia guest nas 4
+primeiras "Assertion failed" (`runtime/msvcrt.c`), log dedup de
+`GetFileAttributesW` + watchdog de pilha após 3000 chamadas
+(`runtime/swat4_shims.c`), log do retorno WM_NCCREATE por janela.

@@ -16,6 +16,14 @@
 #define _GNU_SOURCE
 #include "rt.h"
 #include "game.h"
+/* Window registry living in user32.c (shared with the A-shims). */
+extern uint32_t user32_next_hwnd(void);
+extern void user32_win_register(uint32_t hwnd, uint32_t wndproc, uint32_t parent, uint32_t style, uint32_t exstyle);
+extern void user32_win_unregister(uint32_t hwnd);
+extern uint32_t user32_win_classproc(uint32_t hwnd);
+extern uint32_t user32_main_hwnd(void);
+extern int32_t user32_win_getlong(uint32_t hwnd, int32_t idx);
+extern int32_t user32_win_setlong(uint32_t hwnd, int32_t idx, int32_t val);
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -438,6 +446,38 @@ static uint32_t map_attrs(struct stat *st) { return attrs_of_mode(st->st_mode); 
 SHIM(GetFileAttributesW) {
     char path[1024], host[1024];
     gw2a(ARG(0), path, sizeof path);
+    {   /* diagnostic: unique probed paths + one guest chain dump once the
+         * config-file polling loop is clearly spinning */
+        static char last[1024];
+        static int shown, calls, dumped;
+        if (!last[0] || strcmp(last, path)) {
+            snprintf(last, sizeof last, "%s", path);
+            if (shown++ < 400) LOG("GetFileAttributesW '%s'", path);
+        }
+        if (!dumped && ++calls > 3000) {
+            dumped = 1;
+            fprintf(stderr, "GFAW-WATCHDOG after %d calls: guest stack scan\n", calls);
+            fprintf(stderr, "  chain:");
+            uint32_t sp = c->r[4];
+            for (int i = 0; i < 600; i++) {
+                uint32_t v = M32(sp + 4 * i);
+                if (v < 0x10000 || v >= 0x40000000u) continue;
+                const char *mod = NULL; uint32_t base = 0;
+                if (v >= 0x10900000 && v < 0x10950000) { mod = "Swat4.exe"; base = 0x10900000; }
+                else {
+                    extern const char *const g_dll_modules[];
+                    extern const uint32_t g_dll_bases[];
+                    for (int m = 0; g_dll_modules[m]; m++) {
+                        uint32_t b = g_dll_bases[m];
+                        if (b && v >= b && v - b < 0x1000000u && b > base) { base = b; mod = g_dll_modules[m]; }
+                    }
+                }
+                if (mod) fprintf(stderr, " %s+%x", mod, v - base);
+            }
+            fputc('\n', stderr);
+            fflush(stderr);
+        }
+    }
     rt_host_path(path, host, sizeof host);
     struct stat st;
     if (stat(host, &st)) { rt_set_last_error(c, 2); RET(INVALID_HANDLE, 1); }
@@ -723,7 +763,7 @@ SHIM(CreateWindowExW) {
         int ci = (int)clsarg - 0xC000;
         if (ci >= 0 && ci < g_nclasses) wndproc = *(uint32_t *)(g_classes[ci].wc + 8);
     }
-    uint32_t hwnd = 0x00010001u;
+    uint32_t hwnd = user32_next_hwnd();
     static int create_depth;
     if (wndproc && create_depth < 2) {
         create_depth++;
@@ -735,15 +775,21 @@ SHIM(CreateWindowExW) {
         M32(cs + 36) = ARG(2); M32(cs + 40) = ARG(1); M32(cs + 44) = ARG(0);
         uint32_t a[4] = {hwnd, 0x81 /* WM_NCCREATE */, 0, cs};
         uint32_t r = rt_invoke(c, wndproc, 4, a);
+        {   /* diagnostic: which object/virtual answered WM_NCCREATE */
+            uint32_t obj = ARG(11), vt = obj ? M32(obj) : 0;
+            LOG("CreateWindowExW hwnd=%08x wndproc=%08x WM_NCCREATE -> %u (obj=%08x vtbl=%08x vt+1C=%08x exstyle=%08x)",
+                hwnd, wndproc, r, obj, vt, vt ? M32(vt + 0x1C) : 0, ARG(0));
+        }
         if (!r) { gfree(cs); create_depth--; RET(0, 12); }
         a[1] = 0x1; /* WM_CREATE */
         rt_invoke(c, wndproc, 4, a);
         gfree(cs);
         create_depth--;
     }
+    user32_win_register(hwnd, wndproc, ARG(8), ARG(3), ARG(0));
     RET(hwnd, 12);
 }
-SHIM(DestroyWindow) { RET(1, 1); }
+SHIM(DestroyWindow) { user32_win_unregister(ARG(0)); RET(1, 1); }
 SHIM(ShowWindow) { RET(0, 2); }
 SHIM(ReleaseCapture) { RET(1, 0); }
 SHIM(SetCapture) { RET(0, 1); }
@@ -752,7 +798,16 @@ SHIM(MessageBeep) { RET(1, 1); }
 SHIM(SetFocus) { RET(0, 1); }
 SHIM(GetFocus) { RET(0, 0); }
 SHIM(PeekMessageW) { RET(0, 5); }
-SHIM(DispatchMessageW) { RET(0, 1); }
+SHIM(DispatchMessageW) {
+    uint32_t m = ARG(0);
+    uint32_t r = 0;
+    uint32_t proc = user32_win_classproc(M32(m));
+    if (proc && M32(m + 4) != 0x12) {
+        uint32_t args[4] = {M32(m), M32(m + 4), M32(m + 8), M32(m + 12)};
+        r = rt_invoke(c, proc, 4, args);
+    }
+    RET(r, 1);
+}
 SHIM(PostMessageW) { RET(1, 4); }
 SHIM(PostMessageA) { RET(1, 4); }
 SHIM(PostThreadMessageA) { RET(1, 4); }
@@ -862,14 +917,49 @@ SHIM(DrawTextExA) { RET(1, 8); }
 SHIM(DrawTextExW) { RET(1, 8); }
 SHIM(IsZoomed) { RET(0, 1); }
 SHIM(IsWindowEnabled) { RET(1, 1); }
-SHIM(IsWindow) { RET(1, 1); }
+/* Win32: a window does not exist yet while WM_NCCREATE/WM_CREATE run —
+ * IsWindow only turns TRUE after CreateWindowEx returns. The registry
+ * mirrors that (user32_win_register runs after the create messages). */
+SHIM(IsWindow) { RET(user32_win_classproc(ARG(0)) ? 1u : 0u, 1); }
+/* IMM32: the engine disables the Input Method Editor on its windows
+ * (WinDrv.dll!ImmAssociateContext). No IME on this runtime: the context
+ * handle is a fake non-null so "prev == NULL" checks behave sanely. */
+static uint32_t g_fake_himc = 0x0C000001u;
+SHIM(ImmAssociateContext) { RET(g_fake_himc, 3); }
+SHIM(ImmGetContext) { RET(g_fake_himc, 1); }
+SHIM(ImmReleaseContext) { RET(1, 2); }
+SHIM(ImmSetOpenStatus) { RET(1, 2); }
+SHIM(ImmGetOpenStatus) { RET(0, 1); }
+SHIM(ImmSetCompositionWindow) { RET(1, 2); }
+SHIM(ImmSetCompositionFontA) { RET(1, 2); }
+SHIM(ImmSetCompositionFontW) { RET(1, 2); }
+SHIM(ImmNotifyIME) { RET(1, 4); }
+SHIM(ImmSimulateHotKey) { RET(1, 2); }
 SHIM(GetParent) { RET(0, 1); }
 SHIM(GetWindowTextA) { RET(0, 3); }
 SHIM(InvalidateRect) { RET(1, 3); }
 SHIM(ValidateRect) { RET(1, 2); }
 SHIM(BringWindowToTop) { RET(1, 1); }
-SHIM(SetWindowLongW) { RET(0, 3); }
-SHIM(GetWindowLongW) { RET(0, 2); }
+SHIM(SetWindowLongW) { RET((uint32_t)user32_win_setlong(ARG(0), (int32_t)ARG(1), (int32_t)ARG(2)), 3); }
+SHIM(GetWindowLongW) { RET((uint32_t)user32_win_getlong(ARG(0), (int32_t)ARG(1)), 2); }
+/* Subclassing path used by Window.dll's controls: CallWindowProc forwards to
+ * the previous wndproc, which on this runtime is a guest function. A NULL
+ * previous proc means the engine never subclassed this window: answer like
+ * DefWindowProc so the caller's Win32 contract still holds. */
+SHIM(CallWindowProcW) {
+    if (!ARG(0)) { uint32_t msg = ARG(2); RET(msg == 0x81 ? 1u : 0u, 5); }
+    uint32_t args[4] = {ARG(1), ARG(2), ARG(3), ARG(4)};
+    uint32_t r = rt_invoke(c, ARG(0), 4, args);
+    RET(r, 5);
+}
+SHIM(CallWindowProcA) {
+    if (!ARG(0)) { uint32_t msg = ARG(2); RET(msg == 0x81 ? 1u : 0u, 5); }
+    uint32_t args[4] = {ARG(1), ARG(2), ARG(3), ARG(4)};
+    uint32_t r = rt_invoke(c, ARG(0), 4, args);
+    RET(r, 5);
+}
+SHIM(EnableWindow) { RET(1, 2); }
+SHIM(WindowFromPoint) { RET(user32_main_hwnd(), 2); }
 SHIM(SetWindowPos) { RET(1, 7); }
 SHIM(GetUpdateRect) { RET(0, 3); }
 SHIM(AdjustWindowRectEx) { RET(1, 4); }
@@ -1248,6 +1338,16 @@ static const ShimDef defs[] = {
     {"USER32.dll", "IsZoomed", shim_IsZoomed},
     {"USER32.dll", "IsWindowEnabled", shim_IsWindowEnabled},
     {"USER32.dll", "IsWindow", shim_IsWindow},
+    {"IMM32.dll", "ImmAssociateContext", shim_ImmAssociateContext},
+    {"IMM32.dll", "ImmGetContext", shim_ImmGetContext},
+    {"IMM32.dll", "ImmReleaseContext", shim_ImmReleaseContext},
+    {"IMM32.dll", "ImmSetOpenStatus", shim_ImmSetOpenStatus},
+    {"IMM32.dll", "ImmGetOpenStatus", shim_ImmGetOpenStatus},
+    {"IMM32.dll", "ImmSetCompositionWindow", shim_ImmSetCompositionWindow},
+    {"IMM32.dll", "ImmSetCompositionFontA", shim_ImmSetCompositionFontA},
+    {"IMM32.dll", "ImmSetCompositionFontW", shim_ImmSetCompositionFontW},
+    {"IMM32.dll", "ImmNotifyIME", shim_ImmNotifyIME},
+    {"IMM32.dll", "ImmSimulateHotKey", shim_ImmSimulateHotKey},
     {"USER32.dll", "GetParent", shim_GetParent},
     {"USER32.dll", "GetWindowTextA", shim_GetWindowTextA},
     {"USER32.dll", "InvalidateRect", shim_InvalidateRect},
@@ -1255,6 +1355,10 @@ static const ShimDef defs[] = {
     {"USER32.dll", "BringWindowToTop", shim_BringWindowToTop},
     {"USER32.dll", "SetWindowLongW", shim_SetWindowLongW},
     {"USER32.dll", "GetWindowLongW", shim_GetWindowLongW},
+    {"USER32.dll", "CallWindowProcW", shim_CallWindowProcW},
+    {"USER32.dll", "CallWindowProcA", shim_CallWindowProcA},
+    {"USER32.dll", "EnableWindow", shim_EnableWindow},
+    {"USER32.dll", "WindowFromPoint", shim_WindowFromPoint},
     {"USER32.dll", "SetWindowPos", shim_SetWindowPos},
     {"USER32.dll", "GetUpdateRect", shim_GetUpdateRect},
     {"USER32.dll", "AdjustWindowRectEx", shim_AdjustWindowRectEx},

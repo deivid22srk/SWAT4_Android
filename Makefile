@@ -6,8 +6,7 @@ DXVK_LIB ?= desktop/build/dxvk
 GAME ?= -DGAME_SWAT4
 CFLAGS = $(GAME) -std=gnu11 $(OPT) -g0 -fno-strict-aliasing -fwrapv -Iruntime -Igen -w
 RTFLAGS = $(GAME) -std=gnu11 -O2 -g -fno-strict-aliasing -fwrapv -Iruntime -Igen -Wall -Wno-unused-function $(shell sdl2-config --cflags)
-CXXFLAGS = $(GAME) -std=c++17 -O2 -g -fno-strict-aliasing -Iruntime -Igen -I$(DXVK)/include/native/directx \
-	-I$(DXVK)/include/native/windows -DDXVK_NATIVE -Wno-everything
+CXXFLAGS = $(GAME) -std=c++17 -O2 -g -fno-strict-aliasing -Iruntime -Igen -I$(DXVK)/include/native/directx -I$(DXVK)/include/native/windows -DDXVK_NATIVE -Wno-everything $(shell sdl2-config --cflags)
 GEN_SRC = $(wildcard gen/*.c)
 GEN_OBJ = $(patsubst gen/%.c,build/gen/%.o,$(GEN_SRC))
 RT_SRC = $(wildcard runtime/*.c)

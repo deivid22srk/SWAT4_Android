@@ -14,6 +14,85 @@ static int g_quit;
 uint32_t user32_wndproc(void) { return g_wndproc; }
 void user32_set_screen(int w, int h) { g_screen_w = w; g_screen_h = h; }
 
+/* ------------------------------------------------------------------ */
+/* Window registry. Real Win32 binds the C++ window object to its HWND
+ * through SetWindowLongPtr(hwnd, 0, obj) during WM_NCCREATE and reads it
+ * back on WM_CREATE to set obj->hWnd. The shims must keep that state or
+ * Window.dll's check(hWndCreated==hWnd) fails forever (the UE2 error box
+ * path then loops, which looked like a black screen). */
+typedef struct {
+    int used;
+    uint32_t hwnd, wndproc, parent, style, exstyle;
+    int32_t neg[8];     /* GWL_* negative-index slots */
+    uint32_t extra[8];  /* class cbWndExtra slots: offsets 0,4,8... */
+} GWin;
+static GWin g_wins[64];
+static uint32_t g_next_hwnd = 0x00010001u;
+
+static GWin *win_find(uint32_t h) {
+    for (int i = 0; i < 64; i++)
+        if (g_wins[i].used && g_wins[i].hwnd == h) return &g_wins[i];
+    return NULL;
+}
+static GWin *win_alloc(void) {
+    for (int i = 0; i < 64; i++)
+        if (!g_wins[i].used) { memset(&g_wins[i], 0, sizeof g_wins[i]); g_wins[i].used = 1; return &g_wins[i]; }
+    return NULL;
+}
+/* New unique HWND for a created window (Windows reuses handles; a stable
+ * increment is enough for the engine's bookkeeping). */
+uint32_t user32_next_hwnd(void) { uint32_t h = g_next_hwnd; g_next_hwnd += 4; return h; }
+void user32_win_register(uint32_t hwnd, uint32_t wndproc, uint32_t parent, uint32_t style, uint32_t exstyle) {
+    GWin *w = win_alloc();
+    if (!w) return;
+    w->hwnd = hwnd; w->wndproc = wndproc; w->parent = parent;
+    w->style = style; w->exstyle = exstyle;
+}
+void user32_win_unregister(uint32_t hwnd) {
+    GWin *w = win_find(hwnd);
+    if (w) w->used = 0;
+}
+uint32_t user32_win_classproc(uint32_t hwnd) {
+    GWin *w = win_find(hwnd);
+    return w ? w->wndproc : 0;
+}
+/* Most recently created window: message-pump target (input focus proxy). */
+uint32_t user32_main_hwnd(void) {
+    for (int i = 63; i >= 0; i--)
+        if (g_wins[i].used) return g_wins[i].hwnd;
+    return FAKE_HWND;
+}
+static int32_t *win_slot(GWin *w, int32_t idx) {
+    /* GWL_* constants are negative; class-extra offsets are >= 0 */
+    switch (idx) {
+    case -4: return &w->neg[0];  /* GWL_WNDPROC */
+    case -6: return &w->neg[1];  /* GWL_HINSTANCE */
+    case -8: return &w->neg[2];  /* GWL_HWNDPARENT */
+    case -12: return &w->neg[3]; /* GWL_ID */
+    case -16: return &w->neg[4]; /* GWL_STYLE */
+    case -20: return &w->neg[5]; /* GWL_EXSTYLE */
+    case -21: return &w->neg[6]; /* GWL_USERDATA */
+    case -24: return &w->neg[7]; /* GWL_MONITOR? keep */
+    default: return (idx >= 0 && idx < 32) ? (int32_t *)&w->extra[idx / 4] : NULL;
+    }
+}
+int32_t user32_win_getlong(uint32_t hwnd, int32_t idx) {
+    GWin *w = win_find(hwnd);
+    if (!w) return idx == -16 ? (int32_t)0x10C00000u : 0; /* legacy fake-style fallback */
+    int32_t *s = win_slot(w, idx);
+    return s ? *s : 0;
+}
+int32_t user32_win_setlong(uint32_t hwnd, int32_t idx, int32_t val) {
+    GWin *w = win_find(hwnd);
+    if (!w) return 0;
+    int32_t *s = win_slot(w, idx);
+    if (!s) return 0;
+    int32_t old = *s;
+    *s = val;
+    if (idx == -4) w->wndproc = (uint32_t)val; /* subclass: keep the live proc */
+    return old;
+}
+
 SHIM(RegisterClassExA) {
     g_wndproc = M32(ARG(0) + 8);
     LOG("RegisterClassExA wndproc=%08x", g_wndproc);
@@ -21,9 +100,39 @@ SHIM(RegisterClassExA) {
 }
 SHIM(CreateWindowExA) {
     LOG("CreateWindowExA '%s' %dx%d", GSTR(ARG(2)) ? GSTR(ARG(2)) : "", (int)ARG(6), (int)ARG(7));
-    RET(FAKE_HWND, 12);
+    /* Same contract as the W shim: deliver WM_NCCREATE/WM_CREATE so the
+     * guest WndProc binds the object (SetWindowLongPtr(hwnd,0,obj)) and
+     * sets obj->hWnd before CreateWindowEx returns. */
+    uint32_t hwnd = user32_next_hwnd();
+    if (g_wndproc) {
+        static int create_depth;
+        if (create_depth < 2) {
+            create_depth++;
+            uint32_t cs = gmalloc(48);
+            memset(MEM + cs, 0, 48);
+            M32(cs + 0) = ARG(11); M32(cs + 4) = ARG(10); M32(cs + 8) = ARG(9);
+            M32(cs + 12) = ARG(8); M32(cs + 16) = ARG(7); M32(cs + 20) = ARG(6);
+            M32(cs + 24) = ARG(5); M32(cs + 28) = ARG(4); M32(cs + 32) = ARG(3);
+            M32(cs + 36) = ARG(2); M32(cs + 40) = ARG(1); M32(cs + 44) = ARG(0);
+            uint32_t a[4] = {hwnd, 0x81 /* WM_NCCREATE */, 0, cs};
+            uint32_t r = rt_invoke(c, g_wndproc, 4, a);
+            if (!r) { gfree(cs); create_depth--; RET(0, 12); }
+            a[1] = 0x1; /* WM_CREATE */
+            rt_invoke(c, g_wndproc, 4, a);
+            gfree(cs);
+            create_depth--;
+        }
+    }
+    user32_win_register(hwnd, g_wndproc, ARG(8), ARG(3), ARG(0));
+    RET(hwnd, 12);
 }
-SHIM(DestroyWindow) { RET(1, 1); }
+SHIM(DestroyWindow) { user32_win_unregister(ARG(0)); RET(1, 1); }
+/* Win32 ShowCursor keeps an internal display count: +1 on TRUE, -1 on
+ * FALSE, returning the new count; the cursor is visible while it is >= 0.
+ * WinDrv.dll polls ShowCursor(FALSE) until the count goes negative — a
+ * constant return made that an infinite loop (the "black screen"). */
+static int g_cursor_count;
+SHIM(ShowCursor) { g_cursor_count += (int32_t)ARG(0) ? 1 : -1; RET((uint32_t)g_cursor_count, 1); }
 SHIM(ShowWindow) { RET(1, 2); }
 SHIM(UpdateWindow) { RET(1, 1); }
 SHIM(MoveWindow) { RET(1, 6); }
@@ -31,7 +140,7 @@ SHIM(SetForegroundWindow) { RET(1, 1); }
 SHIM(GetForegroundWindow) { RET(FAKE_HWND, 0); }
 SHIM(GetDesktopWindow) { RET(0x00010000u, 0); } /* desktop pseudo-HWND */
 SHIM(IsIconic) { RET(0, 1); }
-SHIM(GetWindowLongA) { RET(0x10000000u | 0x00C00000u, 2); } /* WS_VISIBLE | WS_CAPTION */
+SHIM(GetWindowLongA) { RET((uint32_t)user32_win_getlong(ARG(0), (int32_t)ARG(1)), 2); }
 SHIM(AdjustWindowRect) { RET(1, 3); }
 SHIM(GetSystemMetrics) {
     int32_t i = (int32_t)ARG(0);
@@ -42,7 +151,6 @@ SHIM(LoadIconA) { RET(0x20001, 2); }
 SHIM(LoadCursorA) { RET(0x20002, 2); }
 SHIM(SetCursor) { RET(0, 1); }
 SHIM(SetCursorPos) { RET(1, 2); }
-SHIM(ShowCursor) { RET(0, 1); }
 SHIM(LoadKeyboardLayoutA) { RET(0x04090409, 2); }
 /* US layout: virtual-key <-> PC set-1 scan code */
 static const uint8_t k_vk_sc[][2] = {
@@ -109,7 +217,7 @@ SHIM(PeekMessageA) {
     pthread_mutex_unlock(&g_qlock);
     if (!got) RET(0, 5);
     memset(MEM + m, 0, 28);
-    M32(m) = FAKE_HWND;
+    M32(m) = user32_main_hwnd();
     M32(m + 4) = q.msg;
     M32(m + 8) = q.wp;
     M32(m + 12) = q.lp;
@@ -129,9 +237,11 @@ SHIM(TranslateMessage) {
 SHIM(DispatchMessageA) {
     uint32_t m = ARG(0);
     uint32_t r = 0;
-    if (g_wndproc && M32(m + 4) != 0x12) {
+    uint32_t proc = user32_win_classproc(M32(m));
+    if (!proc) proc = g_wndproc;
+    if (proc && M32(m + 4) != 0x12) {
         uint32_t args[4] = {M32(m), M32(m + 4), M32(m + 8), M32(m + 12)};
-        r = rt_invoke(c, g_wndproc, 4, args);
+        r = rt_invoke(c, proc, 4, args);
     }
     RET(r, 1);
 }
@@ -230,7 +340,7 @@ SHIM(ToUnicodeEx) {
 }
 SHIM(TrackMouseEvent) { RET(1, 1); }
 SHIM(SetWindowPos) { RET(1, 7); }
-SHIM(SetWindowLongA) { RET(0, 3); }
+SHIM(SetWindowLongA) { RET((uint32_t)user32_win_setlong(ARG(0), (int32_t)ARG(1), (int32_t)ARG(2)), 3); }
 /* One display mode, the host screen size (DEVMODEA fields by offset). */
 SHIM(EnumDisplaySettingsA) {
     int32_t i = (int32_t)ARG(1);
