@@ -1419,6 +1419,104 @@ static const ShimDef defs[] = {
     {NULL, NULL, NULL}
 };
 
+/* ---- GMalloc foreign-pointer guard ----
+ *
+ * The game's custom allocator is a static Swat4.exe object (0x1092ABE8,
+ * vtable 0x1091CAA0, wired into Core.dll's GMalloc global at 0x10F53A0).
+ * It tracks its blocks per 16 MiB region: bucket[ptr>>24] at this+0x25C
+ * holds a per-region descriptor table, and both Realloc (f_10903E00,
+ * vtbl[1]) and Free (f_109041A0, vtbl[2]) dereference the table WITHOUT
+ * checking for an empty region. Phone log polog (2026-10-31): during the
+ * swat_splashscene GUI class-default serialization an FString whose data
+ * aliases a STATIC Engine.dll buffer (0x18C8AB0) was reassigned/released;
+ * Free(0x18C8AB0) computed region 0x01, found bucket[1]==0 and walked into
+ * the protected null page -> SIGSEGV reading guest 0x1190.
+ *
+ * On Windows the same call pattern would crash too, so the upstream state
+ * diverges (an empty-string assign reaches this path in the port). Rather
+ * than chase every divergence, make the allocator itself tolerant: wrap
+ * vtbl[1]/vtbl[2] and emulate the untracked-pointer cases.
+ *   Free(untracked)        -> no-op (releases nothing, state stays sane)
+ *   Realloc(untracked, 0)  -> 0 (the caller stores Data=0: clean empty)
+ *   Realloc(untracked, n)  -> fresh block via the original Malloc path;
+ *                             the known callers overwrite the full buffer
+ *                             immediately after, so skipping the copy is
+ *                             safe for them.
+ * Tracked pointers take the original code unchanged. */
+#define GMALLOC_VTBL 0x1091CAA0u
+#define GMALLOC_EXE_LO 0x10900000u
+#define GMALLOC_EXE_HI 0x10A50000u
+
+static uint32_t g_gm_orig_realloc, g_gm_orig_free;
+static uint32_t g_gm_guard_hits;
+
+static int gmalloc_foreign(uint32_t self, uint32_t p) {
+    if (p < 0x10000u) return 0; /* null/tiny: keep original semantics */
+    if ((p >= 0x01000000u && p < 0x04000000u) || /* recompiled module images */
+        (p >= GMALLOC_EXE_LO && p < GMALLOC_EXE_HI) || /* exe image */
+        (p >= 0x1A000000u && p < 0x1CA00000u))  /* stacks/TEB/PEB */
+        return 1;
+    if (p >= 0x20000000u && p < 0x40000000u) return 1; /* runtime shim heap */
+    /* everything else: foreign unless the allocator owns that region */
+    return M32(self + (p >> 24) * 4 + 0x25Cu) == 0u;
+}
+
+static void gmalloc_note(const char *what, uint32_t ptr, uint32_t size) {
+    uint32_t hit = __sync_fetch_and_add(&g_gm_guard_hits, 1u);
+    if (hit < 8 || hit % 1000 == 0)
+        LOG("gmalloc guard: %s ptr=%08x size=%u (untracked region %02x, hit #%u)",
+            what, ptr, size, ptr >> 24, hit + 1);
+}
+
+SHIM(gmalloc_realloc_wrap) {
+    uint32_t self = c->r[1];
+    uint32_t ptr = ARG(0), size = ARG(1), tag = ARG(2);
+    if (gmalloc_foreign(self, ptr)) {
+        gmalloc_note("foreign realloc", ptr, size);
+        if (size == 0) RET(0, 3);
+        uint32_t args[3] = {0, size, tag}; /* ptr=0 -> original Malloc path */
+        uint32_t r = rt_invoke(c, g_gm_orig_realloc, 3, args);
+        RET(r, 3);
+    }
+    uint32_t args[3] = {ptr, size, tag};
+    uint32_t r = rt_invoke(c, g_gm_orig_realloc, 3, args);
+    RET(r, 3);
+}
+
+SHIM(gmalloc_free_wrap) {
+    uint32_t self = c->r[1];
+    uint32_t ptr = ARG(0);
+    if (gmalloc_foreign(self, ptr)) {
+        gmalloc_note("foreign free", ptr, 0);
+        RET(0, 1);
+    }
+    uint32_t args[1] = {ptr};
+    rt_invoke(c, g_gm_orig_free, 1, args);
+    RET(0, 1);
+}
+
+/* Called from main() right after the exe image is mapped and before any
+ * guest code runs: the ctor only writes the vtable POINTER into the object
+ * (M32[0x1092ABE8] = 0x1091CAA0), so patching the vtable contents early
+ * survives. If the table does not look like the allocator's, skip quietly. */
+void swat4_gmalloc_guard_install(void) {
+    uint32_t vt = GMALLOC_VTBL;
+    uint32_t m0 = M32(vt), m1 = M32(vt + 4), m2 = M32(vt + 8);
+    if (m0 < GMALLOC_EXE_LO || m0 >= GMALLOC_EXE_HI ||
+        m1 < GMALLOC_EXE_LO || m1 >= GMALLOC_EXE_HI ||
+        m2 < GMALLOC_EXE_LO || m2 >= GMALLOC_EXE_HI) {
+        LOG("gmalloc guard: vtable at %08x unexpected (%08x %08x %08x), not patched",
+            vt, m0, m1, m2);
+        return;
+    }
+    g_gm_orig_realloc = m1;
+    g_gm_orig_free = m2;
+    M32(vt + 4) = rt_thunk(shim_gmalloc_realloc_wrap, "GMalloc.Realloc");
+    M32(vt + 8) = rt_thunk(shim_gmalloc_free_wrap, "GMalloc.Free");
+    LOG("gmalloc guard: Realloc %08x / Free %08x wrapped (orig %08x / %08x)",
+        M32(vt + 4), M32(vt + 8), g_gm_orig_realloc, g_gm_orig_free);
+}
+
 void swat4_shims_init(void) {
     static uint32_t cmd_cell;
     rt_register_shims(crt_defs);

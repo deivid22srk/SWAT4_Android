@@ -621,6 +621,10 @@ extern void platform_init(void);
     load_pe(GAME_EXE, 0, GAME_EXE);
     extern void touch_setup_guest(void);
     touch_setup_guest();
+    /* Wrap the game allocator's Free/Realloc so untracked (foreign) pointers
+     * cannot walk the protected null page (boot crash at guest 0x1190). */
+    extern void swat4_gmalloc_guard_install(void);
+    swat4_gmalloc_guard_install();
     /* Static import closure of Swat4.exe (verified with pefile): its own game
      * DLL imports plus their transitive game-DLL dependencies. Everything
      * else is initialised on demand by LoadLibrary. */

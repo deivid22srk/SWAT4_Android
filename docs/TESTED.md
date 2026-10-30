@@ -533,24 +533,92 @@ pacote**, ou seja, invisível (a barra para de se mover por design depois do
   sonda ausente 0 → -1 (cache) → criação + `dircache_forget` → 1; caixa
   diferente e grafias `./`/`../` resolvem para o mesmo host path.
 
-### Achados para o próximo bloqueio (crash SwatGui/FName, ainda não corrigido)
+### Achados para o próximo bloqueio (crash no GMalloc, corrigido em 2026-10-31)
 
-* O inicializador da tabela (`f_10901E20`, exe) **zera os 256 buckets** em
-  `this+0x25C` e monta uma free-list de 0x8000 nós de 32 bytes em
-  `this+0x65C` (assert `this+0x24C == 0x8000`).
-* A lookup (`f_109041A0`) faz `bucket = hash>>24`,
-  `p = M32(this + bucket*4 + 0x25C)`, `nó = p + (byte<<5)` e lê
-  `M32(nó + 0x10)` **sem checar `p == 0`** — com bucket vazio lê em
-  `(byte<<5)+0x10` ≤ 0x2000, a página nula protegida (o "0x1190" = byte
-  0x8C). No Windows isso não trava: ou o bucket nunca é nulo na lookup
-  (pré-inicialização que não reproduzimos) ou o estado upstream diverge e a
-  lookup só acontece depois de um insert no mesmo bucket.
-* O endereço exato do faulting no desktop (`f_109041A0+0x2e6` na anotação
-  anterior) cai, pela tabela do gen, em **`f_10904350+0x136`** — função de
-  estatísticas (lê `+0x20664/68/6C/70`, multiplica por double e formata),
-  chamada por `f_10903E00`: o crash é sintoma do formatador de relatório
-  lendo um nó nulo, não da lookup em si.
-* Próximo passo sugerido: instrumentar `f_10903E00`/`f_10904350` no desktop
-  (dump do bucket e do hash antes do fault) e descobrir quem deveria ter
-  preenchido `bucket[hash>>24]`.
+* **Correção da interpretação anterior**: a estrutura em `this+0x25C`
+  (256 buckets, nós de 32 bytes, LUT de 0x8001 entradas, contadores em
+  `+0x20664/68/6C/70/74/78`) **não é a tabela de FName — é o malloc
+  customizado do jogo**. Provas: a cadeia do crash passa por
+  `f_1004994` (Core: `TArray::Resize` → `M32[0x10F53A0]` = global GMalloc
+  → vtbl[1]) e `f_10041BA` (Core: atribuição de `FString`); o objeto
+  `this` no crash é `0x1092ABE8` (estático do exe), cujo construtor
+  (`f_109189A0`, exe_07) grava `M32[0x1092ABE8] = 0x1091CAA0` — a vtable;
+  `f_1004994` chama vtbl[1] com `(ptr, newSize, tag)` = **Realloc** e o
+  padrão `M32[ecx]→vtbl[2](ptr)` usado em todo o Core = **Free**.
+* A anotação de desktop `f_109041A0+0x2e6` (seção acima) foi lida como
+  offset **guest** e reatribuída a `f_10904350`; a anotação do handler é
+  offset do **código compilado**, portanto o crash do desktop também era
+  em `f_109041A0` mesmo (a "formatadora de estatísticas" não acessa
+  buckets — revisado no gen).
 
+## 2026-10-31 (noite) — polog.txt: passa do loading e fecha (crash real)
+
+Log do aparelho: `polog.txt` (65 MB, 1.801.765 linhas,
+`releases/download/Log/polog.zip`, APK `124bb2c`).
+
+### Progresso enorme
+
+* `Init: Game engine initialized in 19.427 seconds` (antes o boot nem
+  terminava);
+* `Browse/LoadMap: swat_splashscene`, ~30 pacotes ligados
+  (`SwatEffects.dll`, `REPOhelicopter.dll`, …),
+  `[dkaplan]: URL.Map = swat_splashscene`;
+* o splash passa e a barra anda (as correções de FUSE/negcache/splash
+  funcionaram).
+
+### O crash
+
+`CRASH: signal 11 code 2 at address 0x75b2677190` = leitura guest em
+**0x1190** (página nula), thread principal, ~176 mil linhas depois do
+início do LoadMap:
+
+```
+SDL_main → f_109173DC → f_109115C0 → f_10910280 (loop principal)
+  → f_1090A350 → f_10909770 → f_1411BF8/f_1410E38/f_140E755/f_140A187 (Engine)
+  → f_1003BF2 (Core, ProcessEvent) → VM ×4 níveis → f_140A0CE (Engine)
+  → f_10041BA (Core, FString::operator=) → f_1004994 (Core, TArray::Resize)
+  → vtbl[1] f_10903E00 (exe, Realloc; newSize==0 → vtbl[2])
+  → f_109041A0 (exe, Free) → bucket[0x01] == 0 → M32[0x1180+0x10] → 0x1190
+```
+
+* O ponteiro sendo liberado é **0x018C8AB0** — um **buffer estático do
+  Engine.dll** (imagem 0x1400000-0x1C29000): `f_140A0CE` grava
+  `M32[ebp-0x34] = 0x18C8AB0` (FString local com data = estático) e o
+  pipeline de serialização de defaults das classes GUI
+  ("SaveColor.", "TransitionSpec.NewPos.", "ClientBounds[n]",
+  "Transient.int") termina liberando/realocando esse estático.
+* `Free` computa região `ptr>>24 = 0x01`, lê `M32[this + 0x04 + 0x25C]`
+  (**bucket vazio** — o alocador nunca usou a região 0x01: as arenas vêm
+  de VirtualAlloc ≥ 0x40000000) e desreferencia `bucket + (byte2<<5) +
+  0x10` sem checar → página nula. `byte2 = 0x8C` → 0x8C*32+0x10 = 0x1190.
+* No Windows o mesmo código também crashearia; o estado upstream diverge
+  (uma atribuição de string vazia chega a esse caminho na porta).
+
+### Correção: guard de ponteiro estrangeiro no GMalloc
+
+`runtime/swat4_shims.c` (`swat4_gmalloc_guard_install`, chamada de
+`main.c` logo após `load_pe(GAME_EXE)`): a vtable do alocador
+(`0x1091CAA0`) tem vtbl[1]=Realloc e vtbl[2]=Free substituídos por thunks
+da runtime que classificam o ponteiro:
+
+* imagens dos módulos (0x01000000-0x04000000, exe 0x10900000-0x10A50000),
+  stacks/TEB/PEB (0x1A000000-0x1CA00000) e heap da runtime
+  (0x20000000-0x40000000) → **estrangeiro**;
+* demais faixas → estrangeiro **somente se** `bucket[ptr>>24] == 0` (a
+  própria tabela do alocador decide — as arenas em 0x40000000+ ficam
+  rastreadas e intocadas).
+
+Emulação: `Free(estrangeiro)` = no-op; `Realloc(estrangeiro, 0)` = 0 (o
+chamador grava `Data=0`, FString vazia e sã); `Realloc(estrangeiro, n)` =
+bloco novo via o caminho Malloc original (os chamadores conhecidos
+sobrescrevem o buffer inteiro em seguida). Ponteiros rastreados seguem
+pelo código original. Cada evento loga `gmalloc guard: …` (8 primeiros +
+cada 1000º) — o próximo log dirá quem está liberando estáticos.
+
+### Validação
+
+* `gcc -fsyntax-only -DGAME_SWAT4=1 -Iruntime -Ici/gen_stub` sobre
+  `runtime/swat4_shims.c` e `runtime/main.c`: **rc=0**.
+* Não executável aqui (sem gen compilado local/NDK); a verificação real é
+  o build.yml + o próximo log do aparelho. A instalação tem auto-proteção:
+  se a vtable não contiver 3 endereços do exe, não patcha e loga.
