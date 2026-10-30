@@ -395,3 +395,70 @@ Instrumentação mantida (com limites): dump de cadeia guest nas 4
 primeiras "Assertion failed" (`runtime/msvcrt.c`), log dedup de
 `GetFileAttributesW` + watchdog de pilha após 3000 chamadas
 (`runtime/swat4_shims.c`), log do retorno WM_NCCREATE por janela.
+
+## 2026-10-30 (noite) — tela preta no celular (kslog.txt): sondas de arquivo afogadas em FUSE
+
+Log do aparelho: `kslog.txt` (85,3 MB, 2.014.962 linhas, baixado de
+`releases/download/Log/kslog.txt`). Corrida com o APK que já contém as
+correções de janela/ShowCursor/IMM32: o boot do aparelho agora cria
+janelas (WM_NCCREATE → 1), DXVK 1.9.2 carrega, `Direct3DCreate9` é
+chamado 2× do exe (`GetAdapterIdentifier`/`GetDeviceCaps`/`Release` —
+ainda sem `CreateDevice`, que só vem depois do preload de pacotes), e o
+jogo entra no **preload dos 135 pacotes do boot** ("Loading file …",
+contador 0..134). Carrega 134 pacotes e **trava no último**,
+`FP_paintball`:
+
+* bind do "FP_paintball.dll" ok (pseudo-módulo, `load_library`);
+* `FindPackageFile` sonda `System\.\FP_paintball` (falha), depois
+  `System\..\..\Content\System\FP_paintball` — chamada sem resultado no
+  log, seguida só do loop de poll (`Enter/LeaveCriticalSection` em
+  Core.dll+0x8543f/0x85483 + `Sleep` em +0x85494) até o fim do log.
+
+### Causa raiz: cada sonda custa um readdir de FUSE
+
+O `CreateFileA` do aparelho custa 53–512 iterações do poll (mediana 53,
+p90 199, máx 512) porque **cada sonda de arquivo inexistente re-listava
+o diretório**: o dircache de 16 slots era chaveado pela grafia literal
+do caminho, e o jogo sonda os mesmos ~14 diretórios físicos através das
+grafias do `Startup.ini [Filesystem]
+FilePath=..\..\Content\System;..\..\Content\Scenarios;..\..\Content\Maps;..\..\Content\Test\Maps`
++ CWD → **56 grafias distintas** para ~14 diretórios (5.743 sondas
+falhas contadas no log) → thrash garantido → `opendir/readdir` via FUSE
+a cada sonda → o preload de 135 pacotes (centenas de sondas por pacote)
+leva dezenas de minutos de tela preta. `FP_paintball.ukx` **existe** no
+dados (`Content/Animations/FP_paintball.ukx`, 392.029 bytes —
+confirmado no SW4.zip); o boot só nunca chega na sonda
+`../Animations/FP_paintball.ukx`.
+
+### Correção (`runtime/kernel32.c`)
+
+* `path_canonicalize()`: colapso lexical de `//`, `/./` e `/../` no
+  caminho host dentro de `rt_host_path()` → as 56 grafias colapsam para
+  os diretórios reais; chaves do dircache (e `dircache_forget`) ficam
+  consistentes;
+* dircache 16 → 256 slots.
+
+### Validação (replay das sondas reais do kslog)
+
+`tools/replay_probes.py` extrai o bloco real de `runtime/kernel32.c`
+(dircache/dir_lookup_ci/resolve_ci/path_canonicalize/rt_host_path) e
+gera `canon_test.c` (com a variante pré-fix) (sem canonização, 16 slots)
+lado a lado; `tools/replay_probes.py extract` gera 5.496 caminhos CreateFileA
+distintos do kslog. Resultado contra a árvore do jogo extraída
+(SW4.zip):
+
+| Métrica | Antes | Depois |
+|---|---|---|
+| Divergências de resolução (stat inode) | — | **0** (obrigatório) |
+| Arquivos encontrados | 112 | 112 |
+| Grafias de diretório distintas | 56 | **13** |
+
+Além disso: `gcc -DGAME_SWAT4 -std=gnu11 -O2 -Iruntime -c
+runtime/kernel32.c` rc=0. O replay não mede FUSE (o aparelho simula os
+`readdir` a cada miss; aqui só o número de chaves importa — 13 ≤ 256 →
+cada diretório é listado 1×).
+
+Estado esperado no aparelho após o fix: preload dos 135 pacotes em
+segundos, boot segue para `CreateDevice` (DXVK) — a partir daí vale o
+estado do desktop: bloqueio seguinte conhecido é o crash de FName no
+binding do SwatGui (seção 2026-10-30 tarde).

@@ -496,15 +496,56 @@ static const char *k_win_user_prefix = "\\users\\player\\";
    CachedShaders cache), each of which used to re-read the whole directory.
    Entries are dropped when the directory's mtime changes or we create in it. */
 typedef struct { char dir[1024]; time_t mtime; long mtime_ns; char *names; size_t len; } DirCache;
-static DirCache g_dircache[16];
+#define DIRCACHE_SLOTS 256
+static DirCache g_dircache[DIRCACHE_SLOTS];
 static int g_dircache_next;
 static pthread_mutex_t g_dircache_mu = PTHREAD_MUTEX_INITIALIZER;
 
 static void dircache_forget(const char *dir) {
     pthread_mutex_lock(&g_dircache_mu);
-    for (int i = 0; i < 16; i++)
+    for (int i = 0; i < DIRCACHE_SLOTS; i++)
         if (g_dircache[i].names && !strcmp(g_dircache[i].dir, dir)) g_dircache[i].dir[0] = 0;
     pthread_mutex_unlock(&g_dircache_mu);
+}
+
+/* Lexically collapse //, /./ and /../ in a host path. The game probes the
+ * same files through the Startup.ini [Filesystem] FilePath spellings
+ * (".\X", "..\..\Content\System\X", "..\..\Content\Maps\X", ...), which
+ * map to dozens of dot-prefixed host spellings per physical directory.
+ * Without collapsing, each spelling was a distinct dircache key and every
+ * probe re-listed the directory over FUSE (~0.1-1 s), turning the boot-time
+ * package preload into minutes of black screen. */
+static void path_canonicalize(char *path) {
+    struct { char *s; size_t l; } comps[192]; /* s points into path; not NUL-terminated */
+    int n = 0;
+    for (char *p = path; *p; ) {
+        while (*p == '/') p++;
+        if (!*p) break;
+        char *s = p;
+        while (*p && *p != '/') p++;
+        size_t l = (size_t)(p - s);
+        if (l == 1 && s[0] == '.') continue;
+        if (l == 2 && s[0] == '.' && s[1] == '.' && n > 0 &&
+            !(comps[n-1].l == 2 && comps[n-1].s[0] == '.' && comps[n-1].s[1] == '.')) {
+            n--; /* pop the previous real component */
+            continue;
+        }
+        if (n >= (int)(sizeof comps / sizeof *comps)) return; /* path left as-is */
+        comps[n].s = s;
+        comps[n].l = l;
+        n++;
+    }
+    char buf[1024];
+    size_t on = 0;
+    if (path[0] == '/') buf[on++] = '/';
+    for (int i = 0; i < n; i++) {
+        if (on + comps[i].l + 2 > sizeof buf) return; /* path left as-is */
+        memcpy(buf + on, comps[i].s, comps[i].l);
+        on += comps[i].l;
+        if (i + 1 < n) buf[on++] = '/';
+    }
+    buf[on] = 0;
+    memcpy(path, buf, on + 1);
 }
 
 /* Finds `comp` in directory `dir` ignoring case; copies the real name into comp. */
@@ -513,14 +554,14 @@ static int dir_lookup_ci(const char *dir, char *comp, size_t compsz) {
     if (stat(dir, &st) != 0) return 0;
     pthread_mutex_lock(&g_dircache_mu);
     DirCache *dc = NULL;
-    for (int i = 0; i < 16; i++)
+    for (int i = 0; i < DIRCACHE_SLOTS; i++)
         if (g_dircache[i].names && !strcmp(g_dircache[i].dir, dir) &&
             g_dircache[i].mtime == st.st_mtim.tv_sec && g_dircache[i].mtime_ns == st.st_mtim.tv_nsec)
             dc = &g_dircache[i];
     if (!dc) {
         DIR *d = opendir(dir);
         if (!d) { pthread_mutex_unlock(&g_dircache_mu); return 0; }
-        dc = &g_dircache[g_dircache_next++ & 15];
+        dc = &g_dircache[g_dircache_next++ % DIRCACHE_SLOTS];
         free(dc->names);
         dc->names = NULL; dc->len = 0;
         size_t cap = 0;
@@ -615,7 +656,7 @@ int rt_host_path(const char *win, char *out, size_t outsz) {
     if (root) snprintf(out, outsz, "%s/%s", root, rel);
     else snprintf(out, outsz, "%s", rel);
     for (char *q = out; *q; q++) if (*q == '\\') *q = '/';
-    /* collapse "//" and "./" */
+    path_canonicalize(out);
     return resolve_ci(out);
 }
 
