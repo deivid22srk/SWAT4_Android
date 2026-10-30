@@ -270,6 +270,7 @@ void B_IDirect3D9_GetAdapterDisplayMode(CPU *c) {
 }
 
 void B_IDirect3D9_CreateDevice(CPU *c) {
+    splash_finish();  /* stop the splash + release its window surface before DXVK claims the window */
     auto *d3d = (IDirect3D9 *)com_host(ARG(0));
     D3DPRESENT_PARAMETERS pp;
     pp_from_guest(ARG(5), &pp);

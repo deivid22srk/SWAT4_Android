@@ -604,7 +604,7 @@ extern const char *const g_dll_modules[];
 extern const uint32_t g_dll_bases[];
 static int g_assert_dumps;
 static void dump_assert_stack(CPU *c, const char *msg) {
-    if (g_assert_dumps >= 6) return;
+    if (g_assert_dumps >= 40) return;
     g_assert_dumps++;
     uint32_t sp = c->r[4];
     fprintf(stderr, "ASSERT-DUMP #%d: \"%s\"\n", g_assert_dumps, msg ? msg : "?");
@@ -663,7 +663,8 @@ SHIM(_vsnwprintf) {
     size_t n = guest_vwfmt(tmp, sizeof tmp - 1, wf, argp);
     if (n > sizeof tmp - 1) n = sizeof tmp - 1;
     tmp[n] = 0;
-    if (strstr(tmp, "Assertion failed") || strstr(tmp, "assertion failed"))
+    if (strstr(tmp, "Assertion failed") || strstr(tmp, "assertion failed") ||
+        strstr(tmp, "General protection fault"))
         dump_assert_stack(c, tmp);
     TRACE("  _vsnwprintf -> \"%s\"", tmp);
     size_t w = widen_to_guest(buf, cap, tmp, n);

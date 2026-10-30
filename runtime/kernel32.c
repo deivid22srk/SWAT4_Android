@@ -1252,13 +1252,19 @@ static uint32_t load_library(const char *n) {
     if (module_absent(n)) return 0;
     return pseudo_module(n);
 }
-SHIM(LoadLibraryA) { RET(load_library(GSTR(ARG(0))), 1); }
+SHIM(LoadLibraryA) {
+    extern void splash_bind_bump(void);
+    splash_bind_bump();
+    RET(load_library(GSTR(ARG(0))), 1);
+}
 SHIM(LoadLibraryW) {
     char buf[260];
     uint32_t s = ARG(0);
     int i = 0;
     for (; i < 259 && M16(s + 2 * i); i++) buf[i] = (char)M16(s + 2 * i);
     buf[i] = 0;
+    extern void splash_bind_bump(void);
+    splash_bind_bump();
     RET(load_library(buf), 1);
 }
 SHIM(LoadLibraryExW) {

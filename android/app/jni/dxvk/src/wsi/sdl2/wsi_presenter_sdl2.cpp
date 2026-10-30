@@ -5,6 +5,9 @@
 
 #include <wsi/native_wsi.h>
 
+#include "../../util/log/log.h"
+#include "../../util/util_string.h"
+
 namespace dxvk::wsi {
 
   VkResult createSurface(
@@ -13,9 +16,13 @@ namespace dxvk::wsi {
           VkSurfaceKHR*       pSurface) {
     SDL_Window* window = fromHwnd(hWindow);
 
-    return SDL_Vulkan_CreateSurface(window, vki->instance(), pSurface)
-         ? VK_SUCCESS
-         : VK_ERROR_OUT_OF_HOST_MEMORY;
+    if (!SDL_Vulkan_CreateSurface(window, vki->instance(), pSurface)) {
+      Logger::err(str::format("SDL2 WSI: SDL_Vulkan_CreateSurface failed: ",
+                              SDL_GetError(), " (window flags ",
+                              SDL_GetWindowFlags(window), ")"));
+      return VK_ERROR_OUT_OF_HOST_MEMORY;
+    }
+    return VK_SUCCESS;
   }
 
 }

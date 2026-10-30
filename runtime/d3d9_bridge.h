@@ -31,4 +31,5 @@ void d3d_trace(CPU *c, const char *name, int nargs);
 extern "C" {
 void *platform_window(void);
 void platform_present_hook(void);
+void splash_finish(void);  /* stop the loading splash; releases the window surface */
 }
