@@ -450,6 +450,102 @@ uint32_t rt_ensure_dll_init(CPU *c, const char *name) {
     return g_dll_bases[i];
 }
 
+/* One-time compat fixups over the user's game files, run before the engine
+ * boots. Every fix here papers over a real bug in the shipped data that UE2
+ * tolerates on Windows only because its C++ exception machinery can unwind —
+ * the lifted code cannot catch, so for us the throw would be fatal. */
+static char *read_whole_file(const char *path, long *out_n) {
+    FILE *f = fopen(path, "rb");
+    if (!f) return NULL;
+    fseek(f, 0, SEEK_END);
+    long n = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (n <= 0 || n > (8 << 20)) { fclose(f); return NULL; }
+    char *buf = malloc(n + 1);
+    if (!buf || fread(buf, 1, n, f) != (size_t)n) { free(buf); fclose(f); return NULL; }
+    buf[n] = 0;
+    fclose(f);
+    *out_n = n;
+    return buf;
+}
+static int write_whole_file(const char *path, const char *buf, long n) {
+    FILE *o = fopen(path, "wb");
+    if (!o) return 0;
+    size_t w = fwrite(buf, 1, n, o);
+    fclose(o);
+    return w == (size_t)n;
+}
+static int str_count(const char *hay, const char *needle) {
+    int n = 0;
+    for (const char *p = hay; (p = strstr(p, needle)) != NULL; p++) n++;
+    return n;
+}
+static char *str_replace_all(const char *src, const char *from, const char *to, long *out_n) {
+    int hits = str_count(src, from);
+    if (!hits) return NULL;
+    char *out = malloc(strlen(src) + (size_t)hits * (strlen(to) - strlen(from)) + 1);
+    char *w = out;
+    for (const char *p = src; *p;) {
+        const char *hit = strstr(p, from);
+        if (!hit) { strcpy(w, p); break; }
+        memcpy(w, p, hit - p); w += hit - p;
+        memcpy(w, to, strlen(to)); w += strlen(to);
+        p = hit + strlen(from);
+    }
+    *out_n = strlen(out);
+    return out;
+}
+
+static void fixup_game_data(void) {
+    char path[1400];
+    long n;
+    /* 1) GOG SWAT 4 ships GuiBase.ini styles pointing at
+     * Texture'gui_tex.resetbutton', a texture that is in NO shipped package
+     * (verified against every .utx name table). UE2's StaticLoadObject throws
+     * "Failed to find object" for it while loading the style defaults and the
+     * caller's catch swallows the throw on Windows. Point the style at the
+     * shipped 'backbox' button texture instead. */
+    snprintf(path, sizeof path, "%s/%s/GuiBase.ini", g_game_dir, GAME_SYS_DIR);
+    char *buf = read_whole_file(path, &n);
+    if (buf && strstr(buf, "gui_tex.resetbutton")) {
+        long out_n;
+        char *out = str_replace_all(buf, "gui_tex.resetbutton", "gui_tex.backbox", &out_n);
+        if (out && write_whole_file(path, out, out_n))
+            LOG("GuiBase.ini: rewrote %d missing Texture'gui_tex.resetbutton' refs to gui_tex.backbox",
+                str_count(buf, "gui_tex.resetbutton"));
+        free(out);
+    }
+    free(buf);
+    /* 2) Engine.dll's GUI controller resolves ini:Engine.Engine.DefaultPlayerMenu
+     * (a UE2.5 key that the SWAT 4 ini never shipped). The retail game never
+     * reaches that code path because the triggering object field stays NULL;
+     * here it does not, so give the engine the same main-menu class the game's
+     * own Default.ini uses for InitialMenuClass. */
+    snprintf(path, sizeof path, "%s/%s/Swat4.ini", g_game_dir, GAME_SYS_DIR);
+    buf = read_whole_file(path, &n);
+    if (buf && !strstr(buf, "DefaultPlayerMenu=") && strstr(buf, "RepoClassName=SwatGame.SwatRepo")) {
+        /* the ini may use CRLF: insert after the RepoClassName line's EOL */
+        const char *repo = strstr(buf, "RepoClassName=SwatGame.SwatRepo");
+        const char *eol = strchr(repo, '\n');
+        if (eol) {
+            char nl = *eol;
+            const char *ins = nl == '\r' ? "\r\nDefaultPlayerMenu=SwatGui.SwatMainMenu"
+                                         : "\nDefaultPlayerMenu=SwatGui.SwatMainMenu";
+            size_t pre = (size_t)(eol - buf) + 1;
+            long out_n = n + strlen(ins);
+            char *out = malloc(out_n + 1);
+            memcpy(out, buf, pre);
+            strcpy(out + pre, ins);
+            memcpy(out + pre + strlen(ins), buf + pre, n - pre);
+            out[out_n] = 0;
+            if (write_whole_file(path, out, out_n))
+                LOG("Swat4.ini: added Engine.Engine.DefaultPlayerMenu=SwatGui.SwatMainMenu");
+            free(out);
+        }
+    }
+    free(buf);
+}
+
 int main(int argc, char **argv) {
     install_crash_handler();
     const char *env = getenv("LB_LOG");
@@ -494,6 +590,7 @@ int main(int argc, char **argv) {
 #endif
     MEM = mmap(NULL, 1ull << 32, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
     if (MEM == MAP_FAILED) rt_fatal("cannot reserve guest address space");
+    fixup_game_data();
     LOG("guest memory at %p (4 GiB)", (void *)MEM);
     /* keep the null page inaccessible to catch null derefs */
     mprotect(MEM, 0x10000, PROT_NONE);

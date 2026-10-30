@@ -612,9 +612,23 @@ SHIM(_vsnwprintf) {
     size_t n = guest_vwfmt(tmp, sizeof tmp - 1, wf, argp);
     if (n > sizeof tmp - 1) n = sizeof tmp - 1;
     tmp[n] = 0;
+    TRACE("  _vsnwprintf -> \"%s\"", tmp);
     size_t w = widen_to_guest(buf, cap, tmp, n);
     if (n >= cap) RETC((uint32_t)-1); /* MSVC: -1 when it did not fit */
     RETC((uint32_t)w);
+}
+
+/* mbstowcs(dest, src, count): narrow (latin-1) -> guest UTF-16.
+ * Engine.dll uses it around the D3D device description / shader setup. */
+SHIM(mbstowcs) {
+    uint32_t dest = ARG(0), src = ARG(1), count = ARG(2);
+    const char *s = src ? GSTR(src) : NULL;
+    if (!s) RETC(0);
+    if (!dest) { uint32_t n = 0; while (s[n]) n++; RETC(n); }
+    uint32_t i = 0;
+    for (; i < count && s[i]; i++) M16(dest + 2 * i) = (uint8_t)s[i];
+    if (i < count) M16(dest + 2 * i) = 0;
+    RETC(i);
 }
 
 static const ShimDef defs[] = {
@@ -639,7 +653,7 @@ static const ShimDef defs[] = {
     S(_CIlog) S(_CIsqrt) S(_CIpow) S(_CIatan2) S(_CIfmod) S2("floor", floor_) S2("ceil", ceil_)
     S2("ldexp", ldexp_) S2("frexp", frexp_) S2("modf", modf_) S(_isnan) S(_finite) S(_fpclass)
     S(_setjmp3) S2("longjmp", longjmp_)
-    S2("strrchr", strrchr_) S2("strstr", strstr_) S2("getenv", getenv_) S(_mbstrlen) S(_vsnwprintf)
+    S2("strrchr", strrchr_) S2("strstr", strstr_) S2("getenv", getenv_) S(_mbstrlen) S(_vsnwprintf) S(mbstowcs)
 #undef S
 #undef S2
     {NULL, NULL, NULL}

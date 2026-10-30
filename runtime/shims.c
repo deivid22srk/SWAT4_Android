@@ -118,6 +118,7 @@ void dinput_init(void);
 void dsound_init(void);
 void msvcrt_init(void);
 void xaudio2_init(void);
+void ws2_init(void);
 void swat4_shims_init(void);
 
 void rt_init_shims(void) {
@@ -130,5 +131,6 @@ void rt_init_shims(void) {
     dsound_init();
     msvcrt_init();
     xaudio2_init();
+    ws2_init();
     swat4_shims_init();
 }

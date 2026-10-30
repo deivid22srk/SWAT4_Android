@@ -486,9 +486,11 @@ SHIM(FindFirstFileW) {
     else { strcpy(g->dir, "."); snprintf(g->pat, sizeof g->pat, "%s", host); }
     if (!strcmp(g->pat, "*.*")) strcpy(g->pat, "*");
     g->d = opendir(g->dir);
+    TRACE("  FFFW spec=%s host=%s", narrow, host);
     if (!g->d || !find_next_w(g, ARG(1))) {
         if (g->d) closedir(g->d);
         free(g);
+        TRACE("  FFFW MISS (lasterr=2)");
         rt_set_last_error(c, 2);
         RET(INVALID_HANDLE, 2);
     }
