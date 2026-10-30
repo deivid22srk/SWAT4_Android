@@ -5,6 +5,17 @@
  *   +0 prev block size | free bit (bit0 of +4)
  *   +4 this block size | flags
  *   +8 payload (16-byte aligned); free blocks store next/prev links here
+ *
+ * Hardened after the bnlog crash (SIGSEGV in gmalloc at MEM+9, i.e. the free
+ * walk dereferenced a tiny guest address): guest code that writes through a
+ * stale lock pointer or overruns a buffer corrupts free-list links or block
+ * headers. Instead of crashing, the allocator now
+ *   - validates every pointer/link it touches (range, alignment, size);
+ *   - keeps a ring of recent alloc/free events and dumps it on corruption;
+ *   - rebuilds the free lists from the boundary-tag chain, quarantining the
+ *     memory after the break point (live blocks there keep working, we just
+ *     never hand that memory out again);
+ *   - drops (and logs) frees of pointers that are not valid heap blocks.
  */
 #include "rt.h"
 #include <string.h>
@@ -20,11 +31,27 @@ static uint32_t g_top = GUEST_HEAP_BASE + 8; /* first block header; payload 16-a
 static uint32_t g_last_block = 0;
 static uint32_t g_bins[NBINS];
 
+/* ---- diagnostics ----
+ * All block headers start at addresses ≡ 8 (mod 16): the heap starts at
+ * GUEST_HEAP_BASE+8 and every block size is a multiple of 16. Payloads are
+ * therefore 16-aligned and a payload pointer p satisfies (p & 15) == 0. */
+#define HEAP_RING 64 /* power of two */
+typedef struct { uint32_t addr, size; const char *tag; uint8_t isfree; } HeapEv;
+static HeapEv g_ring[HEAP_RING];
+static uint32_t g_ring_i;
+static __thread const char *t_tag;
+static uint32_t g_poison_min = 0xFFFFFFFFu; /* first quarantined byte (guest addr) */
+static uint32_t g_corrupt_events;
+
+void gmalloc_set_tag(const char *tag) { t_tag = tag; }
+
 #define BSIZE(b) (M32((b) + 4) & ~15u)
 #define BUSED(b) (M32((b) + 4) & F_USED)
 #define BPREV(b) (M32(b))
 #define NEXTF(b) M32((b) + 8)
 #define PREVF(b) M32((b) + 12)
+
+static void link_free(uint32_t b);
 
 static int bin_of(uint32_t sz) {
     /* 16-byte classes up to 512, then logarithmic */
@@ -34,8 +61,76 @@ static int bin_of(uint32_t sz) {
     return b < NBINS ? b : NBINS - 1;
 }
 
+static void ring_note(uint32_t addr, uint32_t size, int isfree) {
+    HeapEv *e = &g_ring[g_ring_i];
+    e->addr = addr; e->size = size; e->tag = t_tag; e->isfree = (uint8_t)isfree;
+    g_ring_i = (g_ring_i + 1) & (HEAP_RING - 1);
+}
+
+static void ring_dump(uint32_t near_addr) {
+    LOG("heap: last guest-heap events (most recent first, near %08x):", near_addr);
+    for (uint32_t k = 0; k < HEAP_RING; k++) {
+        uint32_t i = (g_ring_i + HEAP_RING - 1 - k) & (HEAP_RING - 1);
+        if (!g_ring[i].addr) continue;
+        LOG("heap:   %s %08x size=%u tag=%s", g_ring[i].isfree ? "free " : "alloc",
+            g_ring[i].addr, g_ring[i].size, g_ring[i].tag ? g_ring[i].tag : "-");
+    }
+}
+
+/* Report a corruption event; full details + ring only for the first few. */
+static void heap_corrupt(const char *what, uint32_t a, uint32_t b, uint32_t c) {
+    uint32_t hit = __sync_fetch_and_add(&g_corrupt_events, 1u);
+    if (hit < 8 || hit % 500 == 0)
+        LOG("heap: CORRUPTION #%u: %s (a=%08x b=%08x c=%08x)", hit + 1, what, a, b, c);
+    if (hit < 8) ring_dump(a);
+}
+
+static int block_sane(uint32_t b) {
+    if (b < GUEST_HEAP_BASE + 8 || b >= g_top) return 0;
+    if ((b & 15) != 8) return 0;
+    uint32_t sz = BSIZE(b);
+    if (sz < MINBLK || (sz & 15)) return 0;
+    if (b + sz > g_top) return 0;
+    return 1;
+}
+
+/* A free-list link must point at a plausible block start (or be null). */
+static int link_sane(uint32_t p) {
+    return p == 0 || ((p & 15) == 8 && p >= GUEST_HEAP_BASE + 8 && p < g_top);
+}
+
+/* Rebuild the segregated free lists by walking the boundary-tag chain.
+ * Everything at/after the first insane header is quarantined: never relinked,
+ * never handed out again, but left untouched so live allocations there keep
+ * working. */
+static void heap_rebuild(void) {
+    memset(g_bins, 0, sizeof g_bins);
+    g_last_block = 0;
+    uint32_t b = GUEST_HEAP_BASE + 8;
+    int freed = 0;
+    while (b < g_top) {
+        if (!block_sane(b)) {
+            if (g_poison_min == 0xFFFFFFFFu || b < g_poison_min) g_poison_min = b;
+            LOG("heap: block chain broken at %08x (hdr %08x %08x links %08x %08x); "
+                "memory [%08x..%08x) quarantined (leaked but still usable)",
+                b, M32(b), M32(b + 4), M32(b + 8), M32(b + 12), b, g_top);
+            for (uint32_t a = (b > GUEST_HEAP_BASE + 32 ? b - 32 : GUEST_HEAP_BASE);
+                 a + 16 <= g_top && a < b + 48; a += 16)
+                LOG("heap:   %08x: %08x %08x %08x %08x", a, M32(a), M32(a + 4), M32(a + 8), M32(a + 12));
+            break;
+        }
+        if (!BUSED(b)) { link_free(b); freed++; }
+        b += BSIZE(b);
+    }
+    LOG("heap: free lists rebuilt from boundary tags, %d free blocks relinked", freed);
+}
+
+#define QUARANTINED(p) (g_poison_min != 0xFFFFFFFFu && (p) >= g_poison_min)
+
 static void unlink_free(uint32_t b) {
     uint32_t n = NEXTF(b), p = PREVF(b);
+    if (!link_sane(p)) p = 0;
+    if (!link_sane(n)) n = 0;
     if (p) NEXTF(p) = n;
     else g_bins[bin_of(BSIZE(b))] = n;
     if (n) PREVF(n) = p;
@@ -60,23 +155,41 @@ uint32_t gmalloc(uint32_t n) {
     if (need < MINBLK) need = MINBLK;
     if (n > 0x7FFFFFFF) return 0;
     pthread_mutex_lock(&g_heap_lock);
+    int rebuilt = 0;
+restart:
     for (int k = bin_of(need); k < NBINS; k++) {
-        for (uint32_t b = g_bins[k]; b; b = NEXTF(b)) {
-            uint32_t sz = BSIZE(b);
-            if (sz < need) continue;
-            unlink_free(b);
-            if (sz - need >= MINBLK) {
-                set_block(b, need, 1);
-                uint32_t r = b + need;
-                M32(r) = need;
-                set_block(r, sz - need, 0);
-                if (g_last_block == b) g_last_block = r;
-                link_free(r);
-            } else {
-                set_block(b, sz, 1);
+        uint32_t steps = 0;
+        uint32_t b = g_bins[k];
+        while (b) {
+            if (++steps > (20u << 20)) { /* cycle/size guard */
+                heap_corrupt("free-list walk stuck", b, k, steps);
+                if (!rebuilt) { rebuilt = 1; heap_rebuild(); goto restart; }
+                break;
             }
-            pthread_mutex_unlock(&g_heap_lock);
-            return b + HDR;
+            if (!block_sane(b) || !link_sane(NEXTF(b)) || !link_sane(PREVF(b))) {
+                heap_corrupt("free-list entry", b, k, M32(b + 4));
+                if (!rebuilt) { rebuilt = 1; heap_rebuild(); goto restart; }
+                break;
+            }
+            uint32_t sz = BSIZE(b);
+            if (sz >= need) {
+                unlink_free(b);
+                if (sz - need >= MINBLK) {
+                    set_block(b, need, 1);
+                    uint32_t r = b + need;
+                    M32(r) = need;
+                    set_block(r, sz - need, 0);
+                    if (g_last_block == b) g_last_block = r;
+                    link_free(r);
+                } else {
+                    set_block(b, sz, 1);
+                }
+                uint32_t ret = b + HDR;
+                ring_note(ret, n, 0);
+                pthread_mutex_unlock(&g_heap_lock);
+                return ret;
+            }
+            b = NEXTF(b);
         }
     }
     if (g_top + need > GUEST_HEAP_END) {
@@ -89,42 +202,64 @@ uint32_t gmalloc(uint32_t n) {
     g_top += need;
     set_block(b, need, 1);
     g_last_block = b;
+    uint32_t ret = b + HDR;
+    ring_note(ret, n, 0);
     pthread_mutex_unlock(&g_heap_lock);
-    return b + HDR;
+    return ret;
 }
 
 void gfree(uint32_t p) {
     if (!p) return;
     pthread_mutex_lock(&g_heap_lock);
     uint32_t b = p - HDR;
-    if (!BUSED(b)) {
+    if (p < GUEST_HEAP_BASE + 16 || p >= g_top || (p & 15) || !block_sane(b)) {
+        heap_corrupt("bad free pointer", p, 0, 0);
         pthread_mutex_unlock(&g_heap_lock);
-        LOG("double free of %08x", p);
+        return;
+    }
+    if (QUARANTINED(b)) {
+        LOG("heap: free of quarantined block %08x dropped", p);
+        pthread_mutex_unlock(&g_heap_lock);
+        return;
+    }
+    if (!BUSED(b)) {
+        heap_corrupt("double free", p, 0, 0);
+        pthread_mutex_unlock(&g_heap_lock);
         return;
     }
     uint32_t sz = BSIZE(b);
     /* merge with next */
     uint32_t nx = b + sz;
-    if (nx < g_top && !BUSED(nx)) {
-        unlink_free(nx);
-        if (g_last_block == nx) g_last_block = b;
-        sz += BSIZE(nx);
+    if (nx < g_top) {
+        if (!block_sane(nx))
+            heap_corrupt("next-block header on free", nx, b, M32(nx + 4));
+        else if (!BUSED(nx)) {
+            unlink_free(nx);
+            if (g_last_block == nx) g_last_block = b;
+            sz += BSIZE(nx);
+        }
     }
     /* merge with previous */
-    if (b > GUEST_HEAP_BASE + 8 && BPREV(b)) {
-        uint32_t pv = b - BPREV(b);
-        if (!BUSED(pv)) {
+    uint32_t prevsz = BPREV(b);
+    if (b > GUEST_HEAP_BASE + 8 && prevsz) {
+        uint32_t pv = b - prevsz;
+        if (pv < GUEST_HEAP_BASE + 8 || (pv & 15) != 8 || pv >= b ||
+            pv + BSIZE(pv) != b || BSIZE(pv) != prevsz) {
+            heap_corrupt("prev-block tag on free", b, prevsz, 0);
+        } else if (!BUSED(pv)) {
             unlink_free(pv);
             if (g_last_block == b) g_last_block = pv;
             sz += BSIZE(pv);
             b = pv;
         }
     }
+    ring_note(p, sz, 1);
     if (b + sz == g_top) {
         /* give the tail back to the bump region */
         g_top = b;
         g_last_block = 0;
         if (b > GUEST_HEAP_BASE + 8 && BPREV(b)) g_last_block = b - BPREV(b);
+        if (g_last_block && QUARANTINED(g_last_block)) g_last_block = 0;
         pthread_mutex_unlock(&g_heap_lock);
         return;
     }
@@ -134,7 +269,17 @@ void gfree(uint32_t p) {
 }
 
 uint32_t gsize(uint32_t p) {
-    return p ? BSIZE(p - HDR) - HDR : 0;
+    if (!p) return 0;
+    pthread_mutex_lock(&g_heap_lock);
+    uint32_t b = p - HDR;
+    if (p < GUEST_HEAP_BASE + 16 || p >= g_top || (p & 15) || !block_sane(b)) {
+        heap_corrupt("gsize bad pointer", p, 0, 0);
+        pthread_mutex_unlock(&g_heap_lock);
+        return 0;
+    }
+    uint32_t r = BSIZE(b) - HDR;
+    pthread_mutex_unlock(&g_heap_lock);
+    return r;
 }
 
 uint32_t grealloc(uint32_t p, uint32_t n) {
@@ -143,7 +288,7 @@ uint32_t grealloc(uint32_t p, uint32_t n) {
     if (n <= old) return p;
     uint32_t q = gmalloc(n);
     if (!q) return 0;
-    memcpy(MEM + q, MEM + p, old);
+    if (old) memcpy(MEM + q, MEM + p, old);
     gfree(p);
     return q;
 }

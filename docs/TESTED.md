@@ -702,3 +702,100 @@ enter+leave) — ~44 M chamadas no boot inteiro.
   `runtime/dispatch.c`, `runtime/kernel32.c`, `runtime/msvcrt.c`: **rc=0**
   (sem warnings novos; os de `-Wall -Wextra` são os pré-existentes de
   `x86.h`).
+
+## 2026-10-30 (noite) — bnlog: crash de heap depois do loading
+
+### O log (`ekk.zip` → `bnlog.zip`, build `85dd9d8`)
+
+Progresso real desta build: a barra anda, o banco de som termina e o menu/
+cena começa a desenhar (aparecem `SetStreamSource`/`DrawIndexedPrimitive`).
+Aos **52 s de uptime** o SDLThread morre:
+
+```
+Fatal signal 11 (SIGSEGV), code 2 (SEGV_ACCERR), fault addr 0x75b3e5a009
+  #00 gmalloc+284            (libmain.so, heap.c)
+  #02 B_IDirect3DIndexBuffer9_Lock(CPU*)+312
+  #03 rt_call+156
+  #07 f_222EFD0+0x384        (D3D9Drv.dll+0x2EFD0 — GetIndexBuffer dinâmico)
+  #08 f_2226EB0              (D3D9Drv — DrawPrimitives)
+  #09..#15 f_14017A3/140F7EF/14030D5/1401889/1412F26/14103D4/1411DFB (Engine)
+  #16/#17 f_21010A0/2101028  (WinDrv)
+  #18..#23 f_10909770/…      (Swat4.exe)
+```
+
+Diagnóstico: o fault addr é **MEM+9** — a primeira página do guest é
+`PROT_NONE` (guarda de null), então o `gmalloc` dereferenciou um "bloco" no
+endereço guest ~5. Os registradores no crash (`x10/x11/x14` apontando para
+`0x20C4E3F8..400`, `x19=0x1c`, `x20/x21=0x30` — valores típicos de índices
+16-bit) mostram que **dados de índice/vértice sobrescreveram links da free
+list ou headers de bloco** do heap guest. O `gmalloc` não tem como saber
+disso — ele só anda a lista.
+
+Vetores prováveis (o heap guest serve a tudo):
+1. **Escrita através de ponteiro de lock depois do Unlock** — o próprio
+   bridge comenta que jogos fazem isso com texturas SYSTEMMEM (por isso
+   existe o caminho *persist*); para vertex/index buffer o shadow é
+   `gfree` no Unlock, e escrita tardia cai em bloco livre.
+2. **Overrun da região travada** (o `+16` de folga já existia porque
+   overruns pequenos são conhecidos).
+3. `gfree`/`grealloc` recebendo ponteiro inválido que por acaso cai na
+   faixa do heap (o guard do GMalloc só cobre os vtables do jogo).
+
+### Correções (runtime/, um commit)
+
+* **`runtime/heap.c` endurecido** — o alocador agora valida tudo que toca:
+  * `block_sane`/`link_sane`: intervalo `[GUEST_HEAP_BASE+8, g_top)`,
+    alinhamento (headers ≡ 8 mod 16, payload ≡ 0), tamanho ≥ MINBLK e
+    múltiplo de 16, bloco dentro de `g_top`;
+  * `gmalloc` valida cada entrada da free list (e conta passos contra
+    ciclo); ao achar lixo: loga `heap: CORRUPTION #N`, **reconstrói as free
+    lists pela cadeia de boundary tags** e recomeça — o jogo continua;
+  * a reconstrução **quarentena** a memória a partir do primeiro header
+    insano (`g_poison_min`): blocos vivos ali continuam funcionando, só não
+    é mais entregue memória daquela região (vazamento controlado em vez de
+    crash);
+  * `gfree`/`gsize` rejeitam ponteiro inválido (`bad free pointer`) e
+    double free com log, sem tocar no heap; merges validam os headers do
+    vizinho antes de fundir;
+  * anel de 64 eventos `alloc/free` (com *tag* da origem) logado junto de
+    cada corrupção — o próximo log diz **qual alocação estava perto** do
+    bloco estragado;
+  * `gmalloc_set_tag()`: "idx-lock"/"vtx-lock"/"tex-rect"/"tex-box" nas
+    alocações de shadow do bridge.
+* **`runtime/d3d9_bridge.cpp`**:
+  * shadow de lock agora é `[dados][+16 folga][+32 canário 0xA9]`; o
+    canário é verificado no Unlock/flush e loga
+    `d3d9: GUEST OVERRUN … tag=idx-lock … wrote at least N bytes past the
+    locked region` — pega o vetor 2 em flagrante com o objeto e tamanho;
+  **vertex/index (e locks simples) passam a reusar UM buffer guest por
+  objeto** (`g_buf_shadow`) em vez de `gmalloc`/`gfree` por lock (vetor 1:
+  escrita tardia cai no próprio buffer em cache, que o próximo lock do
+  mesmo objeto reaproveita); liberado no Release via `shadow_forget`;
+  * `Lock(off ≥ desc.Size)` volta `D3DERR_INVALIDCALL` com log em vez de
+    `size = desc.Size - off` com underflow.
+* **`runtime/main.c`**: log de boot `heap: hardened allocator active …`
+  para confirmar em campo que a build nova está rodando.
+
+### Validação local (sem aparelho)
+
+* **Teste novo `tools/heap_test.c` + `tools/test_heap.sh`** (compila o
+  `runtime/heap.c` real com stub mínimo de rt.h): smoke, reuse/split de
+  bins, **corrupção de link → rebuild e o bloco volta a ser reusado**,
+  `gfree` selvagem/desalinhado/double-free descartados, header corrompido
+  no `gfree`, **chain quebrada → quarentena e gmalloc vivo**, e martelada
+  de 2×20000 alloc/free em 2 threads sem evento de corrupção: **ALL PASS**.
+  Durante o teste o próprio alocador achou e corrigiu um bug do primeiro
+  rascunho (mínimo de `gfree` rejeitava o primeiro bloco do heap).
+* `gcc -fsyntax-only -DGAME_SWAT4=1 -Iruntime -Ici/gen_stub` sobre os `.c`
+  sem dependência de SDL (inclui `heap.c`, `main.c`): **rc=0**.
+* `g++ -fsyntax-only -std=c++17 -DGAME_SWAT4 -DDXVK_NATIVE` (stubs de SDL2
+  no sandbox) sobre `d3d9_bridge.cpp`, `d3d9_bcemu.cpp`,
+  `d3d9_bridge_gen.cpp`, `touch_swat4.cpp`: **rc=0**.
+
+### O que esperar no próximo log
+
+* Se o crash era corrupção de heap: ou o jogo **passa** do ponto (rebuild
+  em ação), ou morre longe disso com `heap: CORRUPTION` + anel de eventos +
+  `GUEST OVERRUN` dizendo tag/objeto/tamanho — ou seja, o próximo log
+  **nomeia o culpado** em vez de dar SIGSEGV seco no `gmalloc`.
+* `heap: hardened allocator active` no boot confirma a build nova.

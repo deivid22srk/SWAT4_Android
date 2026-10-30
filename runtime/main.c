@@ -625,6 +625,7 @@ extern void platform_init(void);
      * cannot walk the protected null page (boot crash at guest 0x1190). */
     extern void swat4_gmalloc_guard_install(void);
     swat4_gmalloc_guard_install();
+    LOG("heap: hardened allocator active (link validation + canaries + rebuild-on-corruption)");
     /* Static import closure of Swat4.exe (verified with pefile): its own game
      * DLL imports plus their transitive game-DLL dependencies. Everything
      * else is initialised on demand by LoadLibrary. */

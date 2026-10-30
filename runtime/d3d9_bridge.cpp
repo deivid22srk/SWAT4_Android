@@ -14,6 +14,7 @@ bool bc_lock(void *tex, uint32_t sub, uint32_t w, uint32_t h, const RECT *r, DWO
 bool bc_unlock(void *tex, uint32_t sub);
 bool bc_surface_target(void *surf, void **tex, uint32_t *sub);
 #include <mutex>
+#include <atomic>
 #include <unordered_map>
 #include <vector>
 #include <map>
@@ -439,7 +440,14 @@ void B_IDirect3DDevice9_UpdateSurface(CPU *c) {
 // Guest code cannot address host memory, so every lock hands the guest a
 // shadow copy in guest memory and copies it back on unlock.
 namespace {
-struct Shadow { uint32_t guest; void *host; size_t size; DWORD flags; bool persist; };
+/* Layout of a shadow allocation: [0,size) data, [size,size+16) slack for the
+ * small overruns games are known to make, [size+16,size+48) canary. The
+ * canary catches the big overruns (and post-unlock stale writes) that used to
+ * smash the guest heap free lists and crash gmalloc (bnlog: SIGSEGV at
+ * MEM+9). */
+constexpr size_t SHADOW_SLACK = 16, SHADOW_CANARY = 32;
+
+struct Shadow { uint32_t guest; void *host; size_t size; DWORD flags; bool persist; const char *tag; };
 std::map<std::pair<void *, uint32_t>, Shadow> g_shadows;
 std::mutex g_shadow_lock;
 
@@ -447,11 +455,39 @@ std::mutex g_shadow_lock;
 // (and Bink's frame buffers) keep writing through the pointer after unlock,
 // which is valid on Windows for D3DPOOL_SYSTEMMEM. The buffer is copied to
 // the host object on unlock and again before it is used as an update source.
-struct Persist { uint32_t guest; size_t size; std::function<void(const uint8_t *)> upload; };
+struct Persist { uint32_t guest; size_t size; std::function<void(const uint8_t *)> upload; const char *tag; };
 std::map<std::pair<void *, uint32_t>, Persist> g_persist;
 
+// Vertex/index (and plain) locks keep one cached guest buffer per object+sub
+// for the object's lifetime instead of gmalloc/gfree per lock. Locks churn
+// hundreds of times per frame, and if the game writes through the pointer
+// after unlock (as it may legally do on Windows) a freed block corrupts the
+// heap; a cached block just keeps the stale bytes until the next lock of the
+// same object reuses it. Freed by shadow_forget on Release.
+struct BufShadow { uint32_t guest; size_t cap; }; // cap = full allocation size
+std::map<std::pair<void *, uint32_t>, BufShadow> g_buf_shadow;
+
+void canary_fill(uint32_t g, size_t size) {
+    memset(MEM + g + size + SHADOW_SLACK, 0xA9, SHADOW_CANARY);
+}
+
+void canary_check(void *obj, uint32_t g, size_t size, const char *tag, const char *what) {
+    const uint8_t *c = MEM + g + size + SHADOW_SLACK;
+    for (size_t i = 0; i < SHADOW_CANARY; i++) {
+        if (c[i] == 0xA9) continue;
+        static std::atomic<unsigned> hits(0);
+        unsigned h = hits.fetch_add(1);
+        if (h < 8 || h % 500 == 0)
+            LOG("d3d9: GUEST OVERRUN #%u (%s): tag=%s obj=%p guest=%08x size=%zu "
+                "wrote at least %zu bytes past the locked region (canary byte +%zu = %02x)",
+                h + 1, what, tag ? tag : "-", obj, g, size, SHADOW_SLACK + i + 1, i, c[i]);
+        break;
+    }
+}
+
 uint32_t shadow_begin(void *obj, uint32_t sub, void *hostbits, size_t size, DWORD flags,
-                      std::function<void(const uint8_t *)> upload = nullptr) {
+                      std::function<void(const uint8_t *)> upload = nullptr,
+                      const char *tag = nullptr) {
     uint32_t g = 0;
     bool persist = upload != nullptr;
     std::lock_guard<std::mutex> l(g_shadow_lock);
@@ -461,17 +497,35 @@ uint32_t shadow_begin(void *obj, uint32_t sub, void *hostbits, size_t size, DWOR
             g = it->second.guest; // guest copy is authoritative
         } else {
             if (it != g_persist.end()) gfree(it->second.guest);
-            g = gmalloc((uint32_t)size + 16);
+            gmalloc_set_tag(tag);
+            g = gmalloc((uint32_t)size + SHADOW_SLACK + SHADOW_CANARY);
+            gmalloc_set_tag(nullptr);
             if (!g) rt_fatal("out of guest memory for a %zu byte lock", size);
             memcpy(MEM + g, hostbits, size);
-            g_persist[{obj, sub}] = Persist{g, size, upload};
+            g_persist[{obj, sub}] = Persist{g, size, upload, tag};
         }
     } else {
-        g = gmalloc((uint32_t)size + 16);
-        if (!g) rt_fatal("out of guest memory for a %zu byte lock", size);
+        size_t need = size + SHADOW_SLACK + SHADOW_CANARY;
+        auto cit = g_buf_shadow.find({obj, sub});
+        if (cit != g_buf_shadow.end()) {
+            if (cit->second.cap >= need) {
+                g = cit->second.guest; // cached buffer large enough: reuse
+            } else {
+                gfree(cit->second.guest); // too small: grow
+                g_buf_shadow.erase(cit);
+            }
+        }
+        if (!g) {
+            gmalloc_set_tag(tag);
+            g = gmalloc((uint32_t)need);
+            gmalloc_set_tag(nullptr);
+            if (!g) rt_fatal("out of guest memory for a %zu byte lock", size);
+            g_buf_shadow[{obj, sub}] = BufShadow{g, need};
+        }
         if (!(flags & D3DLOCK_DISCARD)) memcpy(MEM + g, hostbits, size);
     }
-    g_shadows[{obj, sub}] = Shadow{g, hostbits, size, flags, persist};
+    canary_fill(g, size);
+    g_shadows[{obj, sub}] = Shadow{g, hostbits, size, flags, persist, tag};
     return g;
 }
 
@@ -484,8 +538,9 @@ bool shadow_end(void *obj, uint32_t sub) {
         s = it->second;
         g_shadows.erase(it);
     }
+    canary_check(obj, s.guest, s.size, s.tag, "unlock");
     if (!(s.flags & D3DLOCK_READONLY)) memcpy(s.host, MEM + s.guest, s.size);
-    if (!s.persist) gfree(s.guest);
+    /* non-persist buffers stay cached for the object's lifetime (g_buf_shadow) */
     return true;
 }
 }
@@ -495,8 +550,12 @@ void shadow_flush(void *obj) {
     std::vector<std::pair<const uint8_t *, std::function<void(const uint8_t *)>>> todo;
     {
         std::lock_guard<std::mutex> l(g_shadow_lock);
-        for (auto &kv : g_persist)
-            if (kv.first.first == obj && !g_shadows.count(kv.first)) todo.push_back({MEM + kv.second.guest, kv.second.upload});
+        for (auto &kv : g_persist) {
+            if (kv.first.first == obj && !g_shadows.count(kv.first)) {
+                canary_check(obj, kv.second.guest, kv.second.size, kv.second.tag, "flush");
+                todo.push_back({MEM + kv.second.guest, kv.second.upload});
+            }
+        }
     }
     for (auto &t : todo) t.second(t.first);
 }
@@ -505,6 +564,10 @@ void shadow_forget(void *obj) {
     std::lock_guard<std::mutex> l(g_shadow_lock);
     for (auto it = g_persist.begin(); it != g_persist.end();) {
         if (it->first.first == obj) { gfree(it->second.guest); it = g_persist.erase(it); }
+        else ++it;
+    }
+    for (auto it = g_buf_shadow.begin(); it != g_buf_shadow.end();) {
+        if (it->first.first == obj) { gfree(it->second.guest); it = g_buf_shadow.erase(it); }
         else ++it;
     }
 }
@@ -528,10 +591,11 @@ size_t rect_bytes(const D3DSURFACE_DESC &desc, const RECT *r, INT pitch) {
 
 void lock_rect_common(CPU *c, void *obj, uint32_t sub, const D3DSURFACE_DESC &desc, HRESULT hr,
                       const D3DLOCKED_RECT &lr, const RECT *r, DWORD flags, uint32_t out,
-                      std::function<void(const uint8_t *)> upload = nullptr) {
+                      std::function<void(const uint8_t *)> upload = nullptr,
+                      const char *tag = "tex-rect") {
     if (FAILED(hr)) { M32(out) = 0; M32(out + 4) = 0; return; }
     if (desc.Pool != D3DPOOL_SYSTEMMEM || r) upload = nullptr;
-    uint32_t g = shadow_begin(obj, sub, lr.pBits, rect_bytes(desc, r, lr.Pitch), flags, upload);
+    uint32_t g = shadow_begin(obj, sub, lr.pBits, rect_bytes(desc, r, lr.Pitch), flags, upload, tag);
     M32(out) = (uint32_t)lr.Pitch;
     M32(out + 4) = g;
 }
@@ -626,7 +690,7 @@ static void lock_box_common(void *obj, uint32_t sub, const D3DVOLUME_DESC &desc,
     if (FAILED(hr)) { M32(out) = M32(out + 4) = M32(out + 8) = 0; return; }
     uint32_t depth = b ? b->Back - b->Front : desc.Depth;
     size_t size = (size_t)lb.SlicePitch * depth;
-    uint32_t g = shadow_begin(obj, sub, lb.pBits, size, flags);
+    uint32_t g = shadow_begin(obj, sub, lb.pBits, size, flags, nullptr, "tex-box");
     M32(out) = (uint32_t)lb.RowPitch;
     M32(out + 4) = (uint32_t)lb.SlicePitch;
     M32(out + 8) = g;
@@ -667,18 +731,24 @@ void B_IDirect3DVolume9_UnlockBox(CPU *c) {
 }
 
 template <class B, class D>
-static void buffer_lock(CPU *c) {
+static void buffer_lock(CPU *c, const char *tag) {
     auto *b = (B *)com_host(ARG(0));
     uint32_t off = ARG(1), size = ARG(2), flags = ARG(4);
     D desc;
     b->GetDesc(&desc);
+    if (off >= desc.Size) {
+        LOG("d3d9: %s Lock(off=%u size=%u) past buffer size %u - failing the lock",
+            tag, off, size, desc.Size);
+        M32(ARG(3)) = 0;
+        RET(0x8876086Cu /* D3DERR_INVALIDCALL */, 5);
+    }
     if (size == 0 || off + size > desc.Size) size = desc.Size - off;
     void *p = nullptr;
     HRESULT hr = b->Lock(off, size, &p, flags);
     if (FAILED(hr) || !p) { M32(ARG(3)) = 0; RET(hr, 5); }
     // NOOVERWRITE/DISCARD writers never read back the old contents.
     DWORD sflags = flags & (D3DLOCK_DISCARD | D3DLOCK_NOOVERWRITE) ? (flags | D3DLOCK_DISCARD) : flags;
-    M32(ARG(3)) = shadow_begin(b, 0, p, size, sflags);
+    M32(ARG(3)) = shadow_begin(b, 0, p, size, sflags, nullptr, tag);
     RET(hr, 5);
 }
 
@@ -689,9 +759,9 @@ static void buffer_unlock(CPU *c) {
     RET(b->Unlock(), 1);
 }
 
-void B_IDirect3DVertexBuffer9_Lock(CPU *c) { buffer_lock<IDirect3DVertexBuffer9, D3DVERTEXBUFFER_DESC>(c); }
+void B_IDirect3DVertexBuffer9_Lock(CPU *c) { buffer_lock<IDirect3DVertexBuffer9, D3DVERTEXBUFFER_DESC>(c, "vtx-lock"); }
 void B_IDirect3DVertexBuffer9_Unlock(CPU *c) { buffer_unlock<IDirect3DVertexBuffer9>(c); }
-void B_IDirect3DIndexBuffer9_Lock(CPU *c) { buffer_lock<IDirect3DIndexBuffer9, D3DINDEXBUFFER_DESC>(c); }
+void B_IDirect3DIndexBuffer9_Lock(CPU *c) { buffer_lock<IDirect3DIndexBuffer9, D3DINDEXBUFFER_DESC>(c, "idx-lock"); }
 void B_IDirect3DIndexBuffer9_Unlock(CPU *c) { buffer_unlock<IDirect3DIndexBuffer9>(c); }
 
 // ---------------------------------------------------------------- misc

@@ -67,6 +67,9 @@ uint32_t grealloc(uint32_t p, uint32_t size);
 uint32_t gsize(uint32_t p);
 uint32_t gvalloc(uint32_t addr, uint32_t size);
 void gvfree(uint32_t addr);
+/* Best-effort label for the next gmalloc on this thread; shows up in the
+ * heap event ring when corruption is diagnosed ("idx-lock", "vtx-lock", ...). */
+void gmalloc_set_tag(const char *tag);
 static inline char *GSTR(uint32_t a) { return a ? (char *)(MEM + a) : NULL; }
 static inline void *GPTR(uint32_t a) { return a ? (void *)(MEM + a) : NULL; }
 uint32_t gstrdup(const char *s);
