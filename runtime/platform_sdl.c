@@ -26,6 +26,7 @@ static SDL_mutex *g_splash_mx;
 static SDL_Surface *g_splash_logo;
 static volatile int g_splash_quit;
 static volatile int g_splash_binds;  /* LoadLibrary count -> progress */
+static volatile int g_splash_loads;  /* "Loading file" events -> package preload progress */
 
 static void splash_draw(void) {
     SDL_Surface *s = SDL_GetWindowSurface(g_window);
@@ -47,9 +48,18 @@ static void splash_draw(void) {
             dst.y = (s->h - dst.h) / 2 - s->h / 12;
             SDL_BlitSurface(g_splash_logo, NULL, s, &dst);
         }
-        /* progress: p = 1 - e^(-binds/90), capped at 95% until the first frame */
+        /* progress: p = 1 - e^(-binds/90), capped at 95% until the first frame.
+         * The DLL binds stop after module init, and the boot then spends its
+         * real time in the package preload (~160 "Loading file" events) with
+         * no new binds — that is the frozen bar the user saw. Carry the bar
+         * from ~66% (≈95 binds) to 95% over the preload. */
         int n = g_splash_binds;
         int pct = 100 - (int)(100.0 * exp(-n / 90.0));
+        {
+            int loads = g_splash_loads < 160 ? g_splash_loads : 160;
+            int pl = 66 + loads * 29 / 160;
+            if (pl > pct) pct = pl;
+        }
         if (pct > 95) pct = 95;
         if (pct < 2) pct = 2;
         int bw = dst.w * 3 / 4, bx = (s->w - bw) / 2, by = dst.y + dst.h + s->h / 24, bh = 6;
@@ -72,6 +82,7 @@ static int SDLCALL splash_thread(void *arg) {
             SDL_UnlockMutex(g_splash_mx);
         }
         SDL_Delay(120);
+        fflush(stderr);  /* the log is fully buffered; keep it fresh on kills */
     }
     return 0;
 }
@@ -120,6 +131,7 @@ void splash_finish(void) {
 }
 
 void splash_bind_bump(void) { g_splash_binds++; }
+void splash_load_bump(void) { g_splash_loads++; }
 /* ------------------------------------------------------------------ */
 
 void platform_init(void) {
@@ -309,6 +321,7 @@ void platform_present_hook(void) {
     script_events();
     g_frames++;
     if (g_frames % 300 == 0) LOG("frame %d", g_frames);
+    if (g_frames % 60 == 0) fflush(stderr);  /* fully buffered log: periodic flush */
     {   /* canary: the main thread's static TLS pointer (TEB slot 0 +0x2C) */
         static uint32_t last;
         uint32_t v = M32(GUEST_TEB_BASE + 0x2C);

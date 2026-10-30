@@ -462,3 +462,95 @@ Estado esperado no aparelho após o fix: preload dos 135 pacotes em
 segundos, boot segue para `CreateDevice` (DXVK) — a partir daí vale o
 estado do desktop: bloqueio seguinte conhecido é o crash de FName no
 binding do SwatGui (seção 2026-10-30 tarde).
+
+## 2026-10-31 — boot "travado em 65%" (inog.txt): trace de API + sondas negativas afogando o FUSE
+
+Log do aparelho: `inog.txt` (373 MB, **9.097.149 linhas**,
+`releases/download/Log/inog.zip`, APK `eef089c` com o fix de canonicalização).
+Screenshot `Screenshot_20261030-135257.png`: splash com a barra parada em
+~65%.
+
+### O que o log mostra (linha do tempo)
+
+| Linhas | Fase |
+|---|---|
+| 0–245 k | 33 módulos carregam nos endereços previstos, DllMains, splash sobe |
+| 245 k | começa o loop de poll (`Enter/LeaveCriticalSection` + `Sleep` em `Core.dll+0x8543f/0x85483/0x85494`) — thread de fundo, inofensiva |
+| 277 k–7,69 M | **preload de pacotes avança**: 155 eventos `Loading file X...` (SwatGame.u → ... → Editor.u, Packages.md5, Entry.s4m, SwatGui.u, IpDrv.u) |
+| 7,69 M–9,09 M | serialização de defaults de classes GUI ("SaveColor.", "LinkOverrides[n]", "TransitionSpec.NewPos.", "SelectedBKColor.") + centenas de sondas `.int` (Transient.int ×330, SwatGame.int ×225, todas fd=-1) |
+| 9.097.149 | log termina no meio do loop (app morto travado) |
+
+**O boot não estava morto — estava progredindo a ~48 k linhas de trace por
+pacote**, ou seja, invisível (a barra para de se mover por design depois do
+último bind de DLL) e lento demais para terminar.
+
+### Causas raiz medidas no log
+
+1. **Trace de API em nível 2 com log line-buffered em FUSE.** O launcher
+   grava `log=2` no `port.cfg` quando o usuário marca "verbose"; cada linha
+   do trace virava um `write()` no armazenamento compartilhado. 9 M de
+   linhas = 9 M de escritas FUSE só de log. Contagem por API: `timeGetTime`
+   208 k, `_vsnwprintf` 145 k, `GetFileAttributesW` 60 k, `Sleep` 60 k,
+   `GetFullPathNameA` 51 k, `CreateFileW` 26 k.
+2. **Sondas negativas repetidas.** O mesmo arquivo ausente é sondado
+   centenas de vezes (o UE2 reabre o `.int` de localização a cada consulta
+   que falha); cada sonda custa canonicalização + `resolve_ci` + `stat` no
+   FUSE. O dircache de 256 slots já evita o `readdir`, mas o `stat`/open
+   falho repete.
+3. **Barra do splash congelada por design.** `pct = 1 - e^(-binds/90)` só
+   avança com `LoadLibrary`; após os ~95 binds ela para (~65%) e o preload
+   inteiro acontece sem feedback — é exatamente o screenshot.
+
+### Correções (runtime/, um commit)
+
+* **Negcache de sondas negativas** (`runtime/kernel32.c`): `rt_host_path`
+  agora devolve `-1` (miss já confirmado antes, servido por hash FNV de
+  4096 slots), `0` (miss novo) ou `1` (achou); misses novos entram no
+  cache. `CreateFileA` falha imediato (ERROR_FILE_NOT_FOUND) no cache hit —
+  **exceto** com `O_CREAT` (criação é permitida); `GetFileAttributesW/ExW`
+  pulam o `stat` no hit. Invalidação: `dircache_forget` chama
+  `negcache_flush()` (e `DeleteFileA`/`MoveFileA`/`CreateDirectoryA`
+  passam a invalidar o diretório).
+* **Log tamponado + flushes periódicos** (`runtime/main.c`,
+  `runtime/platform_sdl.c`): `log.txt` sai de `_IOLBF` (1 write/linha) para
+  `_IOFBF` de 256 KB; flush a cada tick do splash (120 ms) e a cada 60
+  frames — o fim do log sobrevive a kill e o custo despenca ~100×.
+* **Dedup do trace de API** (`runtime/dispatch.c`): chamadas cujo par
+  (nome, esp, ret) já apareceu na janela das últimas 64 são contadas, não
+  impressas (`(×N)` a cada 20 k) — o spam do loop de poll (Enter/Leave/Sleep
+  ×460 k) colapsa.
+* **Splash avança no preload** (`runtime/platform_sdl.c`,
+  `runtime/msvcrt.c`): o shim `_vsnwprintf` reconhece `"Loading file "`
+  (strncmp, custo desprezível) e chama `splash_load_bump()`; a barra passa a
+  andar de ~66% (≈95 binds) até 95% ao longo dos ~160 pacotes.
+
+### Validação
+
+* `gcc -fsyntax-only -DGAME_SWAT4=1 -Iruntime -Ici/gen_stub -I<SDL2>`
+  sobre `runtime/*.c`: **rc=0**.
+* Harness novo `tools/negcache_test.c` (bloco real de `kernel32.c`
+  extraído na compilação, árvore falsa em /tmp): 9/9 checagens ok —
+  sonda ausente 0 → -1 (cache) → criação + `dircache_forget` → 1; caixa
+  diferente e grafias `./`/`../` resolvem para o mesmo host path.
+
+### Achados para o próximo bloqueio (crash SwatGui/FName, ainda não corrigido)
+
+* O inicializador da tabela (`f_10901E20`, exe) **zera os 256 buckets** em
+  `this+0x25C` e monta uma free-list de 0x8000 nós de 32 bytes em
+  `this+0x65C` (assert `this+0x24C == 0x8000`).
+* A lookup (`f_109041A0`) faz `bucket = hash>>24`,
+  `p = M32(this + bucket*4 + 0x25C)`, `nó = p + (byte<<5)` e lê
+  `M32(nó + 0x10)` **sem checar `p == 0`** — com bucket vazio lê em
+  `(byte<<5)+0x10` ≤ 0x2000, a página nula protegida (o "0x1190" = byte
+  0x8C). No Windows isso não trava: ou o bucket nunca é nulo na lookup
+  (pré-inicialização que não reproduzimos) ou o estado upstream diverge e a
+  lookup só acontece depois de um insert no mesmo bucket.
+* O endereço exato do faulting no desktop (`f_109041A0+0x2e6` na anotação
+  anterior) cai, pela tabela do gen, em **`f_10904350+0x136`** — função de
+  estatísticas (lê `+0x20664/68/6C/70`, multiplica por double e formata),
+  chamada por `f_10903E00`: o crash é sintoma do formatador de relatório
+  lendo um nó nulo, não da lookup em si.
+* Próximo passo sugerido: instrumentar `f_10903E00`/`f_10904350` no desktop
+  (dump do bucket e do hash antes do fault) e descobrir quem deveria ter
+  preenchido `bucket[hash>>24]`.
+

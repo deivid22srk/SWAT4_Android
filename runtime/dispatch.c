@@ -52,15 +52,43 @@ static GuestFn lookup(uint32_t a) {
     return NULL;
 }
 
+/* API trace with run-length compression: the idle/poll threads emit the same
+ * call sites millions of times (the log reached 9M lines / 373 MB at log=2,
+ * dominating boot time on FUSE storage). Calls whose site+stack were already
+ * traced in the recent window are counted, not printed. */
+#define T_HIST 64
+static char t_hist[T_HIST][96];
+static unsigned t_hn;
+static uint32_t t_rep;
+static int t_seen(const char *cur) {
+    for (unsigned i = 0; i < T_HIST; i++)
+        if (t_hist[i][0] && !strcmp(t_hist[i], cur)) return 1;
+    return 0;
+}
+static void trace_thunk(int enter, const char *name, uint32_t esp, uint32_t ret) {
+    char cur[96];
+    snprintf(cur, sizeof cur, "%d %s %08x %08x", enter, name, esp, ret);
+    if (t_seen(cur)) {
+        t_rep++;
+        if (t_rep % 20000 == 0) TRACE("   (repeated calls x%u)", t_rep);
+        return;
+    }
+    if (t_rep) { TRACE("   (x%u)", t_rep); t_rep = 0; }
+    snprintf(t_hist[t_hn], sizeof t_hist[0], "%s", cur);
+    t_hn = (t_hn + 1) & (T_HIST - 1);
+    if (enter) TRACE("-> %s esp=%08x ret=%08x", name, esp, ret);
+    else TRACE("<- %s esp=%08x", name, esp);
+}
+
 void rt_call(CPU *c, uint32_t t) {
     if (t >= GUEST_THUNK_BASE) {
         uint32_t i = (t - GUEST_THUNK_BASE) / 4;
         if (i < g_nthunks) {
-            TRACE("-> %s esp=%08x ret=%08x", g_thunks[i].name, c->r[4], M32(c->r[4]));
+            if (g_log_level > 1) trace_thunk(1, g_thunks[i].name, c->r[4], M32(c->r[4]));
             if (!g_thunks[i].fn)
                 rt_fatal("unimplemented import %s (called from %08x)", g_thunks[i].name, M32(c->r[4]));
             g_thunks[i].fn(c);
-            TRACE("<- %s esp=%08x", g_thunks[i].name, c->r[4]);
+            if (g_log_level > 1) trace_thunk(0, g_thunks[i].name, c->r[4], 0);
             return;
         }
     }

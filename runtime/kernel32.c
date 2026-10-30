@@ -501,7 +501,68 @@ static DirCache g_dircache[DIRCACHE_SLOTS];
 static int g_dircache_next;
 static pthread_mutex_t g_dircache_mu = PTHREAD_MUTEX_INITIALIZER;
 
+/* Negative probe cache: canonical host paths already resolved and confirmed
+ * missing. The engine re-probes the same absent files hundreds of times
+ * (localization .int packages, CachedShaders, every FilePath spelling of a
+ * package name); on FUSE each retry costs stat()/resolve rounds even with a
+ * warm dircache, and the boot-time package preload made them millions. With
+ * the cache a repeat miss is a strcmp. Flushed whenever a directory changes
+ * (dircache_forget) so a later CreateFile/mkdir cannot resurrect a stale
+ * "missing". rt_host_path returns -1 for a cached miss, 0 for a fresh miss
+ * (still safe to stat) and 1 for found. */
+#define NEGCACHE_SLOTS 4096
+static struct { char *path; uint32_t hash; } g_negcache[NEGCACHE_SLOTS];
+static pthread_mutex_t g_negcache_mu = PTHREAD_MUTEX_INITIALIZER;
+
+static uint32_t negcache_hash(const char *s) {
+    uint32_t h = 2166136261u;
+    while (*s) { h ^= (uint8_t)*s++; h *= 16777619u; }
+    return h;
+}
+static int negcache_hit(const char *p) {
+    uint32_t h = negcache_hash(p), i = h & (NEGCACHE_SLOTS - 1);
+    int hit = 0;
+    pthread_mutex_lock(&g_negcache_mu);
+    for (int probe = 0; probe < 8; probe++) {
+        uint32_t idx = (i + (uint32_t)probe) & (NEGCACHE_SLOTS - 1);
+        if (!g_negcache[idx].path) break;
+        if (g_negcache[idx].hash == h && !strcmp(g_negcache[idx].path, p)) { hit = 1; break; }
+    }
+    pthread_mutex_unlock(&g_negcache_mu);
+    return hit;
+}
+static void negcache_add(const char *p) {
+    uint32_t h = negcache_hash(p), i = h & (NEGCACHE_SLOTS - 1);
+    pthread_mutex_lock(&g_negcache_mu);
+    for (int probe = 0; probe < 8; probe++) {
+        uint32_t idx = (i + (uint32_t)probe) & (NEGCACHE_SLOTS - 1);
+        if (!g_negcache[idx].path) {
+            g_negcache[idx].path = strdup(p);
+            g_negcache[idx].hash = h;
+            pthread_mutex_unlock(&g_negcache_mu);
+            return;
+        }
+        if (g_negcache[idx].hash == h && !strcmp(g_negcache[idx].path, p)) {
+            pthread_mutex_unlock(&g_negcache_mu);
+            return;
+        }
+    }
+    free(g_negcache[i].path); /* table full: replace one slot */
+    g_negcache[i].path = strdup(p);
+    g_negcache[i].hash = h;
+    pthread_mutex_unlock(&g_negcache_mu);
+}
+static void negcache_flush(void) {
+    pthread_mutex_lock(&g_negcache_mu);
+    for (int i = 0; i < NEGCACHE_SLOTS; i++) {
+        free(g_negcache[i].path);
+        g_negcache[i].path = NULL;
+    }
+    pthread_mutex_unlock(&g_negcache_mu);
+}
+
 static void dircache_forget(const char *dir) {
+    negcache_flush();
     pthread_mutex_lock(&g_dircache_mu);
     for (int i = 0; i < DIRCACHE_SLOTS; i++)
         if (g_dircache[i].names && !strcmp(g_dircache[i].dir, dir)) g_dircache[i].dir[0] = 0;
@@ -657,7 +718,10 @@ int rt_host_path(const char *win, char *out, size_t outsz) {
     else snprintf(out, outsz, "%s", rel);
     for (char *q = out; *q; q++) if (*q == '\\') *q = '/';
     path_canonicalize(out);
-    return resolve_ci(out);
+    if (negcache_hit(out)) return -1;
+    int found = resolve_ci(out);
+    if (!found) negcache_add(out);
+    return found;
 }
 
 static void mkdirs_for(const char *path) {
@@ -683,6 +747,10 @@ SHIM(CreateFileA) {
     case 3: break;                           /* OPEN_EXISTING */
     case 4: fl |= O_CREAT; break;            /* OPEN_ALWAYS */
     case 5: fl |= O_TRUNC; break;            /* TRUNCATE_EXISTING */
+    }
+    if (exists < 0 && !(fl & O_CREAT)) {   /* negative probe cache: confirmed missing earlier */
+        rt_set_last_error(c, ERROR_FILE_NOT_FOUND);
+        RET(INVALID_HANDLE, 7);
     }
     if (fl & O_CREAT) mkdirs_for(host);
     int fd = open(host, fl, 0644);
@@ -857,6 +925,8 @@ SHIM(GetFileAttributesExA) {
 SHIM(DeleteFileA) {
     char host[1024];
     rt_host_path(GSTR(ARG(0)), host, sizeof host);
+    {   char dir[1024]; snprintf(dir, sizeof dir, "%s", host);
+        char *sl = strrchr(dir, '/'); if (sl) { *sl = 0; dircache_forget(dir); } else dircache_forget("."); }
     RET(unlink(host) == 0, 1);
 }
 SHIM(MoveFileA) {
@@ -864,6 +934,8 @@ SHIM(MoveFileA) {
     rt_host_path(GSTR(ARG(0)), a, sizeof a);
     rt_host_path(GSTR(ARG(1)), b, sizeof b);
     int ok = rename(a, b) == 0;
+    {   char dir[1024]; snprintf(dir, sizeof dir, "%s", b);
+        char *sl = strrchr(dir, '/'); if (sl) { *sl = 0; dircache_forget(dir); } else dircache_forget("."); }
     LOG("MoveFileA %s -> %s: %s", a, b, ok ? "ok" : strerror(errno));
     RET(ok, 2);
 }
@@ -871,6 +943,8 @@ SHIM(CreateDirectoryA) {
     char host[1024];
     rt_host_path(GSTR(ARG(0)), host, sizeof host);
     mkdirs_for(host);
+    {   char dir[1024]; snprintf(dir, sizeof dir, "%s", host);
+        char *sl = strrchr(dir, '/'); if (sl) { *sl = 0; dircache_forget(dir); } else dircache_forget("."); }
     int ok = mkdir(host, 0755) == 0;
     if (!ok && errno == EEXIST) rt_set_last_error(c, ERROR_ALREADY_EXISTS);
     else if (!ok)

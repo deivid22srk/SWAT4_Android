@@ -666,6 +666,10 @@ SHIM(_vsnwprintf) {
     if (strstr(tmp, "Assertion failed") || strstr(tmp, "assertion failed") ||
         strstr(tmp, "General protection fault"))
         dump_assert_stack(c, tmp);
+    if (n >= 13 && !strncmp(tmp, "Loading file ", 13)) {   /* splash progress */
+        extern void splash_load_bump(void);
+        splash_load_bump();
+    }
     TRACE("  _vsnwprintf -> \"%s\"", tmp);
     size_t w = widen_to_guest(buf, cap, tmp, n);
     if (n >= cap) RETC((uint32_t)-1); /* MSVC: -1 when it did not fit */

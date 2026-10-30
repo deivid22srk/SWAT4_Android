@@ -478,15 +478,14 @@ SHIM(GetFileAttributesW) {
             fflush(stderr);
         }
     }
-    rt_host_path(path, host, sizeof host);
     struct stat st;
-    if (stat(host, &st)) { rt_set_last_error(c, 2); RET(INVALID_HANDLE, 1); }
+    if (rt_host_path(path, host, sizeof host) < 0 || stat(host, &st)) { rt_set_last_error(c, 2); RET(INVALID_HANDLE, 1); }
     RET(attrs_of_mode(st.st_mode), 1);
 }
 SHIM(GetFileAttributesExW) {
     char path[1024], host[1024];
     gw2a(ARG(0), path, sizeof path);
-    rt_host_path(path, host, sizeof host);
+    if (rt_host_path(path, host, sizeof host) < 0) { rt_set_last_error(c, 2); RET(0, 3); }
     struct stat st;
     if (stat(host, &st)) { rt_set_last_error(c, 2); RET(0, 3); }
     uint32_t o = ARG(2);

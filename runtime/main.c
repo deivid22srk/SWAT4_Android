@@ -580,7 +580,15 @@ int main(int argc, char **argv) {
         snprintf(g_save_dir, sizeof g_save_dir, "%s/save", port);
         mkdir(g_save_dir, 0777);
         snprintf(logp, sizeof logp, "%s/log.txt", port);
-        if (freopen(logp, "w", stderr)) setvbuf(stderr, NULL, _IOLBF, 0);
+        if (freopen(logp, "w", stderr)) {
+            /* Full buffering: with the trace on (log=2) the boot logs millions
+             * of lines; line buffering turned every line into an FUSE write
+             * and the package preload crawled for dozens of minutes. Flushed
+             * by the splash tick (boot), the present hook (frames) and every
+             * fatal/exit path. */
+            static char lbuf[1 << 18];
+            setvbuf(stderr, lbuf, _IOFBF, sizeof lbuf);
+        }
         if (!env) {
             char cfg[1400];
             snprintf(cfg, sizeof cfg, "%s/port/port.cfg", g_game_dir);
