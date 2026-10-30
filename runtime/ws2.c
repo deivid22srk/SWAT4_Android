@@ -46,7 +46,7 @@ SHIM(WSAStartup) {
 }
 SHIM(WSACleanup) { RET(0, 0); }
 SHIM(WSAGetLastError) { RET(g_wsa_error, 0); }
-SHIM(WSASetLastError) { g_wsa_error = ARG(0); RETC(0); }
+SHIM(WSASetLastError) { g_wsa_error = ARG(0); RET(0, 1); }
 SHIM(__WSAFDIsSet) { RET(0, 2); }
 SHIM(WSAAsyncSelect) { RET(0, 4); }
 SHIM(WSAEventSelect) { RET(0, 3); }
@@ -89,7 +89,14 @@ SHIM(gethostname) {
     RET(0, 2);
 }
 SHIM(gethostbyname) { RET(0, 1); }
-SHIM(gethostbyaddr) { RET(0, 4); }
+SHIM(gethostbyaddr) { RET(0, 3); }
+/* Resolver families the game can reach by ordinal: return NULL so callers
+ * take their "lookup failed" path (the offline convention). Arg counts matter:
+ * every shim must pop exactly ret + the real function's args. */
+SHIM(getprotobyname) { RET(0, 1); }
+SHIM(getprotobynumber) { RET(0, 1); }
+SHIM(getservbyname) { RET(0, 2); }
+SHIM(getservbyport) { RET(0, 2); }
 SHIM(htonl) { RET(htonl(ARG(0)), 1); }
 SHIM(htons) { RET(htons(ARG(0) & 0xFFFF), 1); }
 SHIM(ntohl) { RET(ntohl(ARG(0)), 1); }
@@ -164,8 +171,20 @@ void ws2_init(void) {
     rt_register_shims(by_name);
     /* WSOCK32 exports the same entry points (1.1-era names). */
     rt_register_shims_as("WSOCK32.dll", by_name);
-    /* Ordinal forms: ws2_32 and wsock32 share the BSD socket ordinals and the
-     * classic WSA ordinals (111=WSAGetLastError, 115=WSAStartup, 116=WSACleanup). */
+    /* Ordinal forms. Verified against the real wsock32.dll export table
+     * (same numbering since Win9x; ws2_32 agrees except where noted):
+     *   1-22 BSD sockets, 23 socket, 24-25 GetHostByAddr/GetHostByName aliases;
+     *   51 gethostbyaddr, 52 gethostbyname, 53 getprotobyname,
+     *   54 getprotobynumber, 55 getservbyname, 56 getservbyport, 57 gethostname;
+     * 101 WSAAsyncSelect (ws2_32 only), 111 WSAGetLastError, 112 WSASetLastError,
+     * 115 WSAStartup, 116 WSACleanup, 151 __WSAFDIsSet.
+     *
+     * These thunks are stdcall: a wrong entry shifts the guest stack by the
+     * arg-count delta and the caller's pop edi/pop esi reload garbage into
+     * callee-saved registers. ekk log: Engine.dll's master-server probe calls
+     * gethostbyname through WSOCK32!#52; the old map answered __WSAFDIsSet,
+     * which pops one arg too many, so the first lookup during loading left
+     * esi=0 and Swat4.exe's tick crashed on [esi+0x10] right after the call. */
     static const struct { const char *ord; ShimFn fn; } ordmap[] = {
         {"#1", shim_accept}, {"#2", shim_bind}, {"#3", shim_closesocket},
         {"#4", shim_connect}, {"#5", shim_getpeername}, {"#6", shim_getsockname},
@@ -175,11 +194,13 @@ void ws2_init(void) {
         {"#16", shim_recv}, {"#17", shim_recvfrom}, {"#18", shim_select},
         {"#19", shim_send}, {"#20", shim_sendto}, {"#21", shim_setsockopt},
         {"#22", shim_shutdown}, {"#23", shim_socket}, {"#24", shim_gethostbyaddr},
-        {"#25", shim_gethostbyname}, {"#51", shim_gethostbyaddr}, {"#52", shim___WSAFDIsSet},
-        {"#53", shim_gethostname}, {"#55", shim_gethostname}, {"#57", shim_gethostname},
+        {"#25", shim_gethostbyname}, {"#51", shim_gethostbyaddr}, {"#52", shim_gethostbyname},
+        {"#53", shim_getprotobyname}, {"#54", shim_getprotobynumber},
+        {"#55", shim_getservbyname}, {"#56", shim_getservbyport}, {"#57", shim_gethostname},
+        {"#101", shim_WSAAsyncSelect},
         {"#111", shim_WSAGetLastError}, {"#112", shim_WSASetLastError},
         {"#115", shim_WSAStartup}, {"#116", shim_WSACleanup},
-        {"#151", shim_WSAAsyncSelect},
+        {"#151", shim___WSAFDIsSet},
         {NULL, NULL},
     };
     static ShimDef ord_defs[2 * (sizeof ordmap / sizeof ordmap[0])];
