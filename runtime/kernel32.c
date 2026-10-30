@@ -313,8 +313,27 @@ SHIM(GetProcessAffinityMask) {
     RET(1, 3);
 }
 SHIM(SetThreadExecutionState) { RET(0x80000000u, 1); }
+static uint64_t now_ns(void); /* defined in the time section below */
 SHIM(Sleep) {
     uint32_t ms = ARG(0);
+    /* 45log: after the loading bar the game spends a long, silent CPU-bound
+     * stretch building the sound database (no D3D present -> black screen)
+     * and the log had no time axis to tell "slow" from "hung". The guest poll
+     * thread Sleep(1)s steadily, so piggyback a wall-clock heartbeat here. */
+    {
+        static uint64_t base_ns;
+        static uint64_t n_calls, last_ms;
+        uint64_t t = now_ns();
+        if (!base_ns) { base_ns = t; last_ms = 0; }
+        n_calls++;
+        uint64_t sec = (t - base_ns) / 1000000000ull;
+        if (sec >= last_ms + 5) {
+            last_ms = sec;
+            LOG("[heartbeat] t=%llus (Sleep x%llu, ms=%u)", (unsigned long long)sec,
+                (unsigned long long)n_calls, ms);
+            fflush(stderr); /* survive a hard kill; one line per 5 s */
+        }
+    }
     if (ms == 0) sched_yield();
     else usleep(ms * 1000);
     RET(0, 1);

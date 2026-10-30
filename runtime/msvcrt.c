@@ -13,6 +13,46 @@
 
 static uint32_t g_errno_addr, g_iob, g_pioinfo, g_badioinfo, g_locale_c;
 
+/* 45log: the IFC sound-database build (after the loading bar, before the
+ * first D3D frame) logs "SoundSet <name>" / "StreamSoundRef <name>" /
+ * "EventResponse_SoundEffectsSubsystem <name>" and nothing else for minutes
+ * of black screen — the old logs ended there with no way to tell "slow"
+ * from "hung". Count the markers here and emit timed progress lines. */
+static uint32_t g_sndb_sets, g_sndb_refs, g_sndb_evt;
+static int64_t g_sndb_base_ms = -1;
+static int64_t sndb_now_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    int64_t t = (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+    if (g_sndb_base_ms < 0) g_sndb_base_ms = t;
+    return t - g_sndb_base_ms;
+}
+static void sndb_count(const char *tmp, size_t n) {
+    int64_t t;
+    if (n >= 9 && !strncmp(tmp, "SoundSet ", 9)) {
+        if (++g_sndb_sets % 100 == 0) {
+            t = sndb_now_ms();
+            LOG("[sound db] sets=%u refs=%u evt=%u t=%lldms", g_sndb_sets,
+                g_sndb_refs, g_sndb_evt, (long long)t);
+            fflush(stderr); /* survive a hard kill; rare line */
+        }
+    } else if (n >= 15 && !strncmp(tmp, "StreamSoundRef ", 15)) {
+        if (++g_sndb_refs % 500 == 0) {
+            t = sndb_now_ms();
+            LOG("[sound db] sets=%u refs=%u evt=%u t=%lldms", g_sndb_sets,
+                g_sndb_refs, g_sndb_evt, (long long)t);
+            fflush(stderr);
+        }
+    } else if (n >= 36 && !strncmp(tmp, "EventResponse_SoundEffectsSubsystem ", 36)) {
+        if (++g_sndb_evt % 200 == 0) {
+            t = sndb_now_ms();
+            LOG("[sound db] sets=%u refs=%u evt=%u t=%lldms", g_sndb_sets,
+                g_sndb_refs, g_sndb_evt, (long long)t);
+            fflush(stderr);
+        }
+    }
+}
+
 /* ---------------- guest printf/scanf ---------------- */
 /* Formats with arguments read from guest stack memory at *argp. */
 size_t guest_vformat(char *out, size_t cap, const char *fmt, uint32_t argp) {
@@ -670,6 +710,7 @@ SHIM(_vsnwprintf) {
         extern void splash_load_bump(void);
         splash_load_bump();
     }
+    sndb_count(tmp, n);
     TRACE("  _vsnwprintf -> \"%s\"", tmp);
     size_t w = widen_to_guest(buf, cap, tmp, n);
     if (n >= cap) RETC((uint32_t)-1); /* MSVC: -1 when it did not fit */

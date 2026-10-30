@@ -622,3 +622,83 @@ cada 1000º) — o próximo log dirá quem está liberando estáticos.
 * Não executável aqui (sem gen compilado local/NDK); a verificação real é
   o build.yml + o próximo log do aparelho. A instalação tem auto-proteção:
   se a vtable não contiver 3 endereços do exe, não patcha e loga.
+
+## 2026-10-31 (noite) — 45log.txt: depois do loading só tela preta (sem fechar)
+
+Log do aparelho: `45log.txt` (576 MB, **16.240.901 linhas**,
+`releases/download/Log/45log.zip`, APK `dc0bd0c` com o guard do GMalloc).
+
+### O guard funcionou
+
+Nenhum `CRASH`, nenhum exit: o app ficou vivo do início ao fim do log. O
+guard disparou só 2× (`foreign realloc ptr=018c8ab0 size=0`, o estático do
+Engine.dll do crash anterior) e os dois viraram `Data=0` limpos — o jogo
+seguiu em frente.
+
+### Linha do tempo (marcos UE2 no trace)
+
+| Linha do trace | Evento |
+|---|---|
+| 11,93 M | `Game engine initialized in 42.331s`, `Startup time: 48.523s` |
+| 11,92 M | DXVK 1.9.2: `CreateDevice -> 0`, swapchain 2285x1080x5 (MAILBOX) |
+| 11,93 M | `LoadMap: swat_splashscene`, level carregado em 1,035s |
+| 15,37 M | `Loadmap executed in 11.75 seconds` |
+| 15,43 M | `Finished precaching textures in 4.604 seconds` |
+| 15,73 M | subsistemas: `VisualEffectsSubsystem created`, config de som ok, `Bound to` dos 9 pacotes `SW_feet…SW_meta` |
+| 15,74 M–16,24 M | **construção do banco de som IFC**: 765 `SoundSet`, 2509 `StreamSoundRef`, 896 `EventResponse`, 78 `NormalSoundRef` |
+| 16.240.901 | log termina no meio do churn de FString (main thread viva, poller vivo) |
+
+### Por que a tela fica preta (e por que não é crash)
+
+Depois da barra de loading o jogo entra no carregamento do banco de som
+(`SoundEffectsSubsystem`/IFC23): **zero chamadas D3D** no trecho (sem
+`Present`, sem draw) — a janela mostra o último frame ou preto, igual no PC,
+onde essa fase também é uma pausa preta entre a barra e o menu. É trabalho
+100% de CPU: FString/wcsicmp/wcscat + GMalloc (~1,5 M chamadas de API no
+trecho). As provas de vida: o poller de fundo continua (`Enter/Leave/Sleep`
+em `Core.dll+0x8543f/83/94`, `Sleep(1)` — confirmado no gen: `f_10853F0`
+empurra `1` antes de chamar o ponteiro de Sleep), o main thread segue lendo
+pacotes (`ReadFile` até o fim) e os contadores bare do debugf são os totais
+correntes: o "765" e o "2509" do fim do log batem exatamente com o número de
+mensagens `SoundSet`/`StreamSoundRef` — **a construção estava ~90% completa
+quando o log foi capturado**.
+
+Custo extra medido: 3710 sondas de arquivo negativas no trecho (negcache
+segura) e o **trace em log=2 custando mais que o jogo**: a chave do dedup
+fazia `snprintf` + varredura linear de 64 `strcmp` por chamada (×2,
+enter+leave) — ~44 M chamadas no boot inteiro.
+
+### Correções (runtime/, um commit)
+
+* **trace_thunk barato** (`runtime/dispatch.c`): chave montada à mão, hash
+  FNV-1a de 32 bits, janela de 64 hashes (`uint32`) em vez de 64 strings de
+  96 bytes, emissão com `fwrite` + hex manual. Mesma semântica de janela e
+  de `(xN)`/`(repeated calls xN)`; custo por chamada cai ~10×.
+* **Heartbeat de 5 s** (`runtime/kernel32.c`, shim `Sleep`): o thread de
+  poll do jogo dorme 1 ms em loop durante TODAS as fases silenciosas; o shim
+  agora loga `[heartbeat] t=Ns (Sleep xN, ms=N)` a cada 5 s com
+  `fflush` — o próximo log tem eixo de tempo de verdade e sobrevive a kill.
+* **Progresso do banco de som** (`runtime/msvcrt.c`, shim `_vsnwprintf`):
+  conta `SoundSet `/`StreamSoundRef `/`EventResponse_SoundEffectsSubsystem `
+  (1 strncmp por mensagem) e loga `[sound db] sets=N refs=M evt=K t=Xms`
+  a cada 100 sets / 500 refs / 200 event responses, com flush — a próxima
+  sessão mostra o ritmo real da fase preta e se ela termina.
+
+### O que esperar no próximo log
+
+* `[sound db] … t=Xms` deve chegar ao total (~800–900 sets / ~3000+ refs) e
+  parar; logo depois entram as chamadas de áudio (`DirectSoundCreate8` /
+  `CoCreateInstance(CLSID_DirectSound8)`), o init do engine termina e o loop
+  principal começa a presentar frames (primeiros `IDirect3DDevice9#17`).
+* Se a tela continuar preta com heartbeats avançando e sem D3D, o log dirá
+  em qual fase o tempo está indo — sem mais "travou ou não?".
+* Pedir ao usuário: **esperar vários minutos** depois do fim da barra antes
+  de julgar; a fase é longa também no PC (pausa preta entre a barra e o
+  menu), só que no aparelho ela é mais longa ainda.
+
+### Validação
+
+* `gcc -fsyntax-only -DGAME_SWAT4=1 -Iruntime -Ici/gen_stub` sobre
+  `runtime/dispatch.c`, `runtime/kernel32.c`, `runtime/msvcrt.c`: **rc=0**
+  (sem warnings novos; os de `-Wall -Wextra` são os pré-existentes de
+  `x86.h`).

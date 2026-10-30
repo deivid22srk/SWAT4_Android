@@ -55,29 +55,74 @@ static GuestFn lookup(uint32_t a) {
 /* API trace with run-length compression: the idle/poll threads emit the same
  * call sites millions of times (the log reached 9M lines / 373 MB at log=2,
  * dominating boot time on FUSE storage). Calls whose site+stack were already
- * traced in the recent window are counted, not printed. */
+ * traced in the recent window are counted, not printed.
+ *
+ * 45log follow-up: the sound-database build alone makes ~1.5M API calls and
+ * the whole boot ~44M; the old key path spent a snprintf plus a 64x strcmp
+ * scan on EVERY call (x2 per shim: enter+leave), which at log=2 cost more
+ * host CPU than the emulated game itself. Same window semantics, now cheap:
+ * manual key build, 32-bit FNV-1a, hash-only window, single fwrite emit. */
 #define T_HIST 64
-static char t_hist[T_HIST][96];
+static uint32_t t_hist[T_HIST];
 static unsigned t_hn;
 static uint32_t t_rep;
-static int t_seen(const char *cur) {
-    for (unsigned i = 0; i < T_HIST; i++)
-        if (t_hist[i][0] && !strcmp(t_hist[i], cur)) return 1;
-    return 0;
+
+static char *t_emit_hex(char *p, uint32_t v) {
+    static const char d[] = "0123456789abcdef";
+    for (int i = 7; i >= 0; i--) *p++ = d[(v >> (i * 4)) & 0xf];
+    return p;
 }
+
+static uint32_t t_key_hash(int enter, const char *name, uint32_t esp, uint32_t ret) {
+    char key[112], *p = key;
+    *p++ = (char)('0' + (enter & 1));
+    *p++ = ' ';
+    while (*name && p < key + sizeof key - 24) *p++ = *name++;
+    *p++ = ' ';
+    p = t_emit_hex(p, esp);
+    *p++ = ' ';
+    p = t_emit_hex(p, ret);
+    uint32_t h = 2166136261u;
+    for (const char *q = key; q < p; q++) { h ^= (uint8_t)*q; h *= 16777619u; }
+    return h ? h : 1; /* 0 marks an empty window slot */
+}
+
 static void trace_thunk(int enter, const char *name, uint32_t esp, uint32_t ret) {
-    char cur[96];
-    snprintf(cur, sizeof cur, "%d %s %08x %08x", enter, name, esp, ret);
-    if (t_seen(cur)) {
-        t_rep++;
-        if (t_rep % 20000 == 0) TRACE("   (repeated calls x%u)", t_rep);
-        return;
+    uint32_t h = t_key_hash(enter, name, esp, ret);
+    for (unsigned i = 0; i < T_HIST; i++)
+        if (t_hist[i] == h) {
+            t_rep++;
+            if (t_rep % 20000 == 0) {
+                char b[64];
+                int n = snprintf(b, sizeof b, "   (repeated calls x%u)\n", t_rep);
+                fwrite(b, 1, n, stderr);
+            }
+            return;
+        }
+    if (t_rep) {
+        char b[32];
+        int n = snprintf(b, sizeof b, "   (x%u)\n", t_rep);
+        fwrite(b, 1, n, stderr);
+        t_rep = 0;
     }
-    if (t_rep) { TRACE("   (x%u)", t_rep); t_rep = 0; }
-    snprintf(t_hist[t_hn], sizeof t_hist[0], "%s", cur);
+    t_hist[t_hn] = h;
     t_hn = (t_hn + 1) & (T_HIST - 1);
-    if (enter) TRACE("-> %s esp=%08x ret=%08x", name, esp, ret);
-    else TRACE("<- %s esp=%08x", name, esp);
+    /* "-> name esp=xxxxxxxx ret=xxxxxxxx": thunk names are static strings far
+     * below the 128-byte headroom left after the fixed parts. */
+    char line[160], *p = line;
+    *p++ = enter ? '-' : '<';
+    *p++ = '>';
+    *p++ = ' ';
+    const char *q = name;
+    while (*q && p < line + sizeof line - 32) *p++ = *q++;
+    memcpy(p, " esp=", 5); p += 5;
+    p = t_emit_hex(p, esp);
+    if (enter) {
+        memcpy(p, " ret=", 5); p += 5;
+        p = t_emit_hex(p, ret);
+    }
+    *p++ = '\n';
+    fwrite(line, 1, p - line, stderr);
 }
 
 void rt_call(CPU *c, uint32_t t) {
