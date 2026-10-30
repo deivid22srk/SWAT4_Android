@@ -253,3 +253,54 @@ SEH do `WinMain`). O unwinding SEH/C++ continua não implementado.
 * `tools/difftest.py` (lifted vs. unicorn) contra o SWAT 4.
 * Desempenho, memória e tempo de carregamento em hardware.
 * A expansão *The Stetchkov Syndicate*.
+## 2026-10-30 — tela preta no celular (kklog.txt) e bring-up desktop com DXVK real
+
+### Análise do log do aparelho (`kklog.txt`, build `b05c410`)
+
+2.869.066 linhas de trace. Linha do tempo: 33 módulos carregam nos endereços
+previstos → DllMains em ordem de loader → splash/janelas → **4540 CreateFileA
+de pacotes .u** (SwatGame.u 313K, Engine.u, Core.u, SwatEquipmentModels.u com
+fd=123 ✓) → binding nativo de UFunctions (2,77M) → 30 tentativas de abrir
+`../Classes/ALAudio(.u)` em todos os paths (o pacote ALAudio não existe como
+.u; resolve por LoadPackageDLL e segue) → caminhada de diretórios
+(FindFirstFileW no mesmo call site, ~75 varreduras de ~8 entradas) → fim do
+log com o jogo ainda em execução. **Sem appError, sem C++ exception.**
+
+O Direct3DCreate9 só aparece 2x, ambos de `RTCShader.dll!QueryDX9Support`
+(sucesso, DXVK inicializa 2x). O `D3DDrv.dll` (que importa
+`d3d9.dll!Direct3DCreate9` pelo IAT, thunk compartilhado) **nunca chama** —
+o renderer não chegou a inicializar no aparelho quando o log foi capturado.
+
+### Bring-up desktop com DXVK real (não o stub)
+
+O stub `dxvk_stub/libdxvk_d3d9.so` da sessão anterior retorna NULL de propósito
+("Direct3DCreate9 sempre falha") — o erro *Please install DirectX 8.1b or
+later* do desktop era artefato do teste. Ambiente reconstruído sem root: SDL2
+e Vulkan headers/libs extraídos de .deb para `prefix/` (dpkg -x), cmake/ninja
+via pip, gcc no lugar do clang, dxvk-native d3d9 compilado via
+`desktop/CMakeLists.txt`. O `gen/` exigiu divisão dos arquivos >6 MB
+(`engine_00.c` 27 MB e afins) em pedaços por fronteira de função para caber nos
+4 GB deste ambiente (`scripts/split_gen.py`, somente local; o CI usa o gen do
+repo privado, intacto).
+
+Correções, cada uma reproduzida no desktop e commitada (`2c18fab`):
+
+| # | Bloqueio (ordem do boot) | Causa | Correção |
+|---|---|---|---|
+| 1 | `FATAL: unimplemented import WS2_32!#115` | `m4d.dll` chama WSAStartup durante o init do D3D; WinSock não tinha shim nenhum | `runtime/ws2.c`: WS2_32+WSOCK32 por nome e ordinal (WSAStartup preenche WSADATA 2.2; sockets falsos; escrita OK, leitura EWOULDBLOCK) |
+| 2 | `FATAL: unimplemented import MSVCR71!mbstowcs` | Engine.dll converte a descrição do device na init do renderer | `mbstowcs` em `runtime/msvcrt.c` |
+| 3 | `Can't find 'ini:Engine.Engine.DefaultPlayerMenu' in configuration file` durante `LoadMap: Entry.s4m` | chave UE2.5 que o ini do SWAT 4 nunca teve; a engine resolve `ini:` com Filename≠NULL e `appThrowf` — no Windows um catch C++ engole, no lifted não há unwinding | `fixup_game_data()` adiciona `DefaultPlayerMenu=SwatGui.SwatMainMenu` ao Swat4.ini no boot |
+| 4 | `Failed to find object 'Texture gui_tex.resetbutton'` na carga dos estilos | o GuiBase.ini de fábrica referencia uma textura que **não está em nenhum .utx do jogo** (verificado por parser de name table em todos os pacotes; só essa de 436 refs falta); mesmo throw não capturável | `fixup_game_data()` reescreve as 5 referências para `gui_tex.backbox` |
+
+Estado desktop após `2c18fab` (LB_LOG=1, Xvfb + lavapipe): 33 módulos,
+pacotes, binding, Havok, `Unreal engine initialized`, `Client initialized`,
+device D3D9 criado com caps PS/VS 3.0, `LoadMap: Entry.s4m` executado
+(0,15 s), loop de render com swapchain DXVK 1280x720/3 imagens. O 2º
+CreateDevice (troca de modo na carga do level) leva minutos no lavapipe
+(compilação de pipeline em CPU) — no Adreno é GPU real. Sem crash em 300 s de
+execução; framebuffer do Xvfb ainda preto (intro/entry), verificação visual do
+menu pendente.
+
+Diagnóstico instrumentado que sustenta a tabela: `_vsnwprintf` agora loga a
+mensagem formatada (`  _vsnwprintf -> "..."` no trace), e o trace do
+FindFirstFileW mostra spec/host de cada varredura.
