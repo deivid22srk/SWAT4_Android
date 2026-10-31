@@ -3,6 +3,7 @@
 // presentation). Everything else is generated into d3d9_bridge_gen.cpp.
 #include <SDL2/SDL.h>
 #include <ctype.h>
+#include <exception>
 #include <functional>
 #include <vector>
 void shadow_flush(void *obj);
@@ -287,6 +288,24 @@ void B_IDirect3D9_GetAdapterDisplayMode(CPU *c) {
  * device survive, matching what the game's SetRes path expects to lose. */
 static IDirect3DDevice9 *g_bridge_dev;
 
+/* DXVK reports internal failures as C++ exceptions. An exception must never
+ * cross into the guest (there is nothing there to unwind: it terminates the
+ * process with an opaque abort inside dxvk — bnlog iutlog: FORTIFY "destroyed
+ * mutex" while the unwinder destroyed a half-dead device). Every host call on
+ * the create/reset/present paths goes through this: the guest gets the same
+ * D3DERR it would get from a failing driver on Windows. */
+template <typename F>
+static HRESULT d3d9_guard(const char *what, F &&fn) {
+    try {
+        return fn();
+    } catch (const std::exception &e) {
+        LOG("d3d9: %s threw %s", what, e.what());
+    } catch (...) {
+        LOG("d3d9: %s threw (unknown)", what);
+    }
+    return D3DERR_DRIVERINTERNALERROR;
+}
+
 void B_IDirect3D9_CreateDevice(CPU *c) {
     splash_finish();  /* stop the splash + release its window surface before DXVK claims the window */
     D3DPRESENT_PARAMETERS pp;
@@ -296,19 +315,32 @@ void B_IDirect3D9_CreateDevice(CPU *c) {
         pp.AutoDepthStencilFormat, M32(ARG(5) + 32), ARG(4), pp.PresentationInterval);
     HRESULT hr;
     if (g_bridge_dev) {
-        hr = g_bridge_dev->Reset(&pp);
+        hr = d3d9_guard("Reset", [&] { return g_bridge_dev->Reset(&pp); });
         pp_to_guest(&pp, ARG(5));
-        /* client == backbuffer on this path too (direct Reset, not the shim) */
-        if (SUCCEEDED(hr) && pp.BackBufferWidth && pp.BackBufferHeight)
-            user32_set_screen((int)pp.BackBufferWidth, (int)pp.BackBufferHeight);
-        if (ARG(6)) M32(ARG(6)) = d3d9_wrap(g_bridge_dev, IFACE_IDirect3DDevice9);
+        if (SUCCEEDED(hr)) {
+            /* CreateDevice hands the caller a NEW COM reference. The reuse
+             * path hands back the same guest wrapper, so grant the matching
+             * host reference here. Without it the game's Release for this
+             * CreateDevice (UE2's SetRes releases + recreates per resolution
+             * change: splash 1142x540, movies 914x432, menu 1142x540) ate
+             * the bridge's own ref and the NEXT CreateDevice ran Reset on a
+             * freed device — dxvk aborted with "destroyed mutex" right after
+             * the last intro video (bnlog iutlog, build #44). */
+            g_bridge_dev->AddRef();
+            /* client == backbuffer on this path too (direct Reset, not the shim) */
+            if (pp.BackBufferWidth && pp.BackBufferHeight)
+                user32_set_screen((int)pp.BackBufferWidth, (int)pp.BackBufferHeight);
+        }
+        if (ARG(6)) M32(ARG(6)) = SUCCEEDED(hr) ? d3d9_wrap(g_bridge_dev, IFACE_IDirect3DDevice9) : 0;
         LOG("CreateDevice(reuse+reset) -> %08x", (uint32_t)hr);
         RET(hr, 7);
     }
     auto *d3d = (IDirect3D9 *)com_host(ARG(0));
     IDirect3DDevice9 *dev = nullptr;
     DWORD flags = ARG(4) | D3DCREATE_MULTITHREADED;
-    hr = d3d->CreateDevice(ARG(1), (D3DDEVTYPE)ARG(2), (HWND)platform_window(), flags, &pp, &dev);
+    hr = d3d9_guard("CreateDevice", [&] {
+        return d3d->CreateDevice(ARG(1), (D3DDEVTYPE)ARG(2), (HWND)platform_window(), flags, &pp, &dev);
+    });
     pp_to_guest(&pp, ARG(5));
     if (SUCCEEDED(hr) && dev) {
         g_bridge_dev = dev;
@@ -354,7 +386,7 @@ void B_IDirect3DDevice9_Reset(CPU *c) {
     auto *d = (IDirect3DDevice9 *)com_host(ARG(0));
     D3DPRESENT_PARAMETERS pp;
     pp_from_guest(ARG(1), &pp);
-    HRESULT hr = d->Reset(&pp);
+    HRESULT hr = d3d9_guard("Reset", [&] { return d->Reset(&pp); });
     pp_to_guest(&pp, ARG(1));
     /* Client == backbuffer, again: an in-game resolution change must keep
      * the menu mouse coordinates 1:1 with what the game renders. */
@@ -417,8 +449,19 @@ void B_IDirect3DDevice9_Present(CPU *c) {
     g_frame++;
     g_d3d_trace = g_frame >= g_trace_from && g_frame <= g_trace_to;
     if (g_d3d_trace) fprintf(stderr, "D3D %d Present\n", g_frame);
-    HRESULT hr = d->Present((const RECT *)GPTR(ARG(1)), (const RECT *)GPTR(ARG(2)), nullptr,
-                            (const RGNDATA *)GPTR(ARG(4)));
+    /* DEVICELOST, not DRIVERINTERNALERROR: UE2's present-failure path knows
+     * how to recover from a lost device (it re-creates it via SetRes). */
+    HRESULT hr;
+    try {
+        hr = d->Present((const RECT *)GPTR(ARG(1)), (const RECT *)GPTR(ARG(2)), nullptr,
+                        (const RGNDATA *)GPTR(ARG(4)));
+    } catch (const std::exception &e) {
+        LOG("d3d9: Present threw %s", e.what());
+        hr = D3DERR_DEVICELOST;
+    } catch (...) {
+        LOG("d3d9: Present threw (unknown)");
+        hr = D3DERR_DEVICELOST;
+    }
     platform_present_hook();
     bisect_present();
     RET(hr, 5);
