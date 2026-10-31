@@ -66,6 +66,14 @@ static GuestFn lookup(uint32_t a) {
 static uint32_t t_hist[T_HIST];
 static unsigned t_hn;
 static uint32_t t_rep;
+static uint64_t t_bytes;              /* trace bytes written this run */
+static int t_over;                    /* byte cap hit: stop tracing, keep LOG() */
+
+/* A verbose run (log=2) traces tens of millions of calls; on a phone that
+ * once made a 609 MB log.txt in a single session. Cap the trace at ~96 MB
+ * per run: regular LOG() lines (errors, milestones) keep flowing, only the
+ * call trace goes quiet. */
+#define T_BYTE_CAP (96ull << 20)
 
 static char *t_emit_hex(char *p, uint32_t v) {
     static const char d[] = "0123456789abcdef";
@@ -88,6 +96,7 @@ static uint32_t t_key_hash(int enter, const char *name, uint32_t esp, uint32_t r
 }
 
 static void trace_thunk(int enter, const char *name, uint32_t esp, uint32_t ret) {
+    if (t_over) return;
     uint32_t h = t_key_hash(enter, name, esp, ret);
     for (unsigned i = 0; i < T_HIST; i++)
         if (t_hist[i] == h) {
@@ -96,6 +105,7 @@ static void trace_thunk(int enter, const char *name, uint32_t esp, uint32_t ret)
                 char b[64];
                 int n = snprintf(b, sizeof b, "   (repeated calls x%u)\n", t_rep);
                 fwrite(b, 1, n, stderr);
+                t_bytes += (uint64_t)n;
             }
             return;
         }
@@ -103,6 +113,7 @@ static void trace_thunk(int enter, const char *name, uint32_t esp, uint32_t ret)
         char b[32];
         int n = snprintf(b, sizeof b, "   (x%u)\n", t_rep);
         fwrite(b, 1, n, stderr);
+        t_bytes += (uint64_t)n;
         t_rep = 0;
     }
     t_hist[t_hn] = h;
@@ -123,6 +134,13 @@ static void trace_thunk(int enter, const char *name, uint32_t esp, uint32_t ret)
     }
     *p++ = '\n';
     fwrite(line, 1, p - line, stderr);
+    t_bytes += (uint64_t)(p - line);
+    if (t_bytes > T_BYTE_CAP) {
+        t_over = 1;
+        t_rep = 0;
+        LOG("trace: byte cap reached (%llu MB), call tracing off for this run",
+            (unsigned long long)(t_bytes >> 20));
+    }
 }
 
 void rt_call(CPU *c, uint32_t t) {

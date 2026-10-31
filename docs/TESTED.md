@@ -870,3 +870,34 @@ Cadeia completa, em ordem:
   `[min, topo-no-rebuild)`, o jogo continua e o heap segue utilizável;
 * Boot mostra a linha nova `… bounded quarantine; game-writable buffers
   >=256 KiB on VirtualAlloc regions`.
+
+## 2026-10-31 — sjx.log (build #33, fc43de0): morte ao aplicar vídeo no menu
+
+Sintaxe do usuário: depois do loading, tela preta e o app fecha consumindo
+toda a RAM. Log de 609 MB (log=2, trace de API).
+
+O que o log mostra (linha: 11.209.576 → 16.683.281):
+
+* Boot **inteiro funcionou**: splash ok, 33 módulos, `CreateDevice 1142x540`
+  ok (`-> 00000000`), overlay de toque inicializou (`overlay: init ok window
+  2285x1080 ... quads=75`, nenhum erro de D3D do overlay), e o jogo rodou
+  **5,5 milhões de linhas de trace** (minutos de renderização = menu vivo).
+  **O HUD não quebrou o boot do #30 — ele deixou o jogo chegar onde o bug
+  latente aparecia.**
+* A morte: ao entrar no menu o jogo re-aplica configurações de vídeo e chama
+  `CreateDevice` de novo (1142x540 → 914x432, 40% de escala). O primeiro
+  device ainda estava vivo; Android só concede **uma** VkSurface por janela
+  nativa → `vkCreateAndroidSurfaceKHR: VK_ERROR_NATIVE_WINDOW_IN_USE` →
+  `CreateDevice -> 8876086a` → o jogo fica em **loop infinito de retry**
+  (cada tentativa reimprime o dump inteiro do DXVK) → log/RAM explodem.
+
+Correções (commit "d3d9: one host device..."):
+
+* `d3d9_bridge.cpp`: o bridge agora tem **um** host device por processo. O
+  primeiro `CreateDevice` cria; os seguintes fazem `Reset` para o modo
+  pedido e devolvem o mesmo wrapper. O AddRef próprio do bridge mantém o
+  host vivo mesmo depois do Release do wrapper anterior (senão `com_forget`
+  invalidaria o handle). Reset no mesmo objeto também preserva recursos,
+  casando com o que o caminho SetRes da UE2 espera.
+* `dispatch.c`: teto de ~96 MB por run no trace de API (o log=2 chegou a
+  609 MB num único run; LOG() normal continua fluindo, só o trace cala).

@@ -271,18 +271,44 @@ void B_IDirect3D9_GetAdapterDisplayMode(CPU *c) {
     RET(0, 3);
 }
 
+/* The game re-creates the D3D device when it applies video settings while
+ * the first device is still alive (entering the main menu: sjx.log shows
+ * CreateDevice 1142x540, minutes of play, then CreateDevice 914x432 in a
+ * retry loop). Android grants exactly ONE VkSurface per native window, so a
+ * second dxvk device can never get one (VK_ERROR_NATIVE_WINDOW_IN_USE) and
+ * the game dies. The bridge therefore owns ONE host device for the whole
+ * process: the first CreateDevice creates it, every later one Resets it to
+ * the requested mode and hands back the same wrapper. The bridge's own
+ * AddRef keeps the host alive even after the game releases the previous
+ * wrapper (com_forget would invalidate it otherwise). Same-object Reset is
+ * also friendlier than a fresh device: resources created on the first
+ * device survive, matching what the game's SetRes path expects to lose. */
+static IDirect3DDevice9 *g_bridge_dev;
+
 void B_IDirect3D9_CreateDevice(CPU *c) {
     splash_finish();  /* stop the splash + release its window surface before DXVK claims the window */
-    auto *d3d = (IDirect3D9 *)com_host(ARG(0));
     D3DPRESENT_PARAMETERS pp;
     pp_from_guest(ARG(5), &pp);
     LOG("CreateDevice %ux%u fmt=%d ds=%d/%d windowed(guest)=%u flags=%x interval=%x",
         pp.BackBufferWidth, pp.BackBufferHeight, pp.BackBufferFormat, pp.EnableAutoDepthStencil,
         pp.AutoDepthStencilFormat, M32(ARG(5) + 32), ARG(4), pp.PresentationInterval);
+    HRESULT hr;
+    if (g_bridge_dev) {
+        hr = g_bridge_dev->Reset(&pp);
+        pp_to_guest(&pp, ARG(5));
+        if (ARG(6)) M32(ARG(6)) = d3d9_wrap(g_bridge_dev, IFACE_IDirect3DDevice9);
+        LOG("CreateDevice(reuse+reset) -> %08x", (uint32_t)hr);
+        RET(hr, 7);
+    }
+    auto *d3d = (IDirect3D9 *)com_host(ARG(0));
     IDirect3DDevice9 *dev = nullptr;
     DWORD flags = ARG(4) | D3DCREATE_MULTITHREADED;
-    HRESULT hr = d3d->CreateDevice(ARG(1), (D3DDEVTYPE)ARG(2), (HWND)platform_window(), flags, &pp, &dev);
+    hr = d3d->CreateDevice(ARG(1), (D3DDEVTYPE)ARG(2), (HWND)platform_window(), flags, &pp, &dev);
     pp_to_guest(&pp, ARG(5));
+    if (SUCCEEDED(hr) && dev) {
+        g_bridge_dev = dev;
+        g_bridge_dev->AddRef();
+    }
     if (ARG(6)) M32(ARG(6)) = SUCCEEDED(hr) ? d3d9_wrap(dev, IFACE_IDirect3DDevice9) : 0;
     LOG("CreateDevice -> %08x", (uint32_t)hr);
     RET(hr, 7);
