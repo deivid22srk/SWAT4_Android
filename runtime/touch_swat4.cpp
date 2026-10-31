@@ -498,11 +498,22 @@ static void apply_release(const Btn *b) {
     }
 }
 
+/* True when another live finger (not `skip_id`) is still pressing `btn_id`.
+ * Holds are state-based in vinput, so the state must only drop when the
+ * LAST finger holding the button lifts. */
+static int other_btn_holder(const TouchState *ts, long skip_id, uint8_t btn_id) {
+    for (int i = 0; i < TOUCH_MAXF; i++)
+        if (ts->f[i].role == R_BTN && ts->f[i].id != skip_id && ts->f[i].btn_id == btn_id)
+            return 1;
+    return 0;
+}
+
 /* (Re)build the layouts when the window size or safe area changed. Live
  * fingers are re-attached to the new rects instead of being dropped: a
  * one-frame flap of the safe area (or a real resize) must not release a
  * held FOGO. Holds whose button is gone from under the finger are released
- * with their OLD definition, so nothing can stay latched either. */
+ * with their OLD definition — but only when no other finger (re-attached or
+ * still live) keeps pressing the same button, so two fingers on FOGO behave. */
 static void ts_release_all(TouchState *ts, uint32_t now);
 static int in_zone(const float *z, float x, float y);
 static void ts_ensure_layout(TouchState *ts, int w, int h, const Safe *s) {
@@ -511,7 +522,9 @@ static void ts_ensure_layout(TouchState *ts, int w, int h, const Safe *s) {
     int had = ts->nbtn != 0;
     Finger live[TOUCH_MAXF];
     Btn oldb[TOUCH_MAXF];
+    int will_keep[TOUCH_MAXF] = {0};
     float sdx = ts->stick_dx, sdy = ts->stick_dy;
+    float ow = (float)ts->w, oh = (float)ts->h;
     int nlive = 0;
     if (had) {
         for (int i = 0; i < TOUCH_MAXF; i++) {
@@ -529,6 +542,7 @@ static void ts_ensure_layout(TouchState *ts, int w, int h, const Safe *s) {
     ts->safe = *s;
     ts->nbtn = hud_layout(&ts->cfg, w, h, s, ts->btns, 15);
     ts->ngrid = hud_grid_layout(&ts->cfg, ts->grid_page, w, h, s, ts->grid, 11, ts->panel);
+    if (ts->ngrid == 0) ts->grid_open = 0; /* no grid to keep open */
     ts->zone[0] = s->left;
     ts->zone[1] = h - s->bottom - 0.38f * h;
     ts->zone[2] = 0.30f * w;
@@ -539,50 +553,74 @@ static void ts_ensure_layout(TouchState *ts, int w, int h, const Safe *s) {
     ts->stick_dead = 0.12f * ts->stick_r;
     if (!had) return;
 
-    /* Forget the fingers (held state stays as it is for now) and re-attach
-     * what still fits; the pend table is untouched, taps drain on time. */
+    /* Decide who re-attaches BEFORE touching anything, so a dropped hold is
+     * only released when no other finger ends up pressing the same button. */
+    int lookers = 0, stick_kept = 0;
+    for (int i = 0; i < nlive; i++) {
+        Finger *of = &live[i];
+        if (of->role == R_STICK)
+            will_keep[i] = stick_kept == 0 && in_zone(ts->zone, of->ox, of->oy);
+        else if (of->role == R_LOOK)
+            will_keep[i] = lookers == 0 && hud_hit(ts->btns, ts->nbtn, of->lx, of->ly) < 0 &&
+                           !in_zone(ts->zone, of->lx, of->ly);
+        else if (of->role == R_BTN) {
+            const Btn *ob = &oldb[i], *nb = ob->kind != 255 ? btn_by_id(ts, ob->id) : NULL;
+            will_keep[i] = nb && (ob->kind == K_MOUSE_HOLD || ob->kind == K_KEY_HOLD) &&
+                           of->lx >= nb->x && of->lx < nb->x + nb->w &&
+                           of->ly >= nb->y && of->ly < nb->y + nb->h;
+        }
+        if (will_keep[i]) {
+            if (of->role == R_STICK) stick_kept = 1;
+            if (of->role == R_LOOK) lookers++;
+        }
+    }
+
+    /* Forget the fingers (held state stays as it is for now) and re-attach;
+     * the pend table is untouched, taps drain on time. Coordinates captured
+     * on the old window are rescaled so the first event after a rotation is
+     * not a scale-mismatched jump. */
+    float sxr = ow > 0 ? (float)w / ow : 1.0f, syr = oh > 0 ? (float)h / oh : 1.0f;
+    int rescale = (int)ow != w || (int)oh != h;
     memset(ts->f, 0, sizeof ts->f);
     ts->active = 0;
     ts->stick_held = 0;
     ts->stick_dx = ts->stick_dy = 0;
-    int lookers = 0;
     for (int i = 0; i < nlive; i++) {
         Finger *of = &live[i];
+        if (!will_keep[i]) {
+            if (of->role == R_STICK) {
+                stick_keys(of->sector, 0); /* stick lost its spot: WASD up */
+            } else if (of->role == R_BTN) {
+                /* release unless some other finger keeps this button held */
+                int kept_by_other = 0;
+                for (int j = 0; j < nlive && !kept_by_other; j++)
+                    if (j != i && live[j].role == R_BTN && live[j].btn_id == of->btn_id &&
+                        will_keep[j])
+                        kept_by_other = 1;
+                if (!kept_by_other) apply_release(&oldb[i]);
+            }
+            continue; /* looks and consumed fingers simply end */
+        }
         Finger *nf = NULL;
         for (int k = 0; k < TOUCH_MAXF && !nf; k++)
             if (ts->f[k].role == R_NONE) nf = &ts->f[k];
+        if (!nf) continue;
+        *nf = *of;
+        if (rescale) {
+            nf->ox *= sxr; nf->oy *= syr;
+            nf->lx *= sxr; nf->ly *= syr;
+        }
+        ts->active++;
         if (of->role == R_STICK) {
-            if (ts->stick_held == 0 && nf && in_zone(ts->zone, of->ox, of->oy)) {
-                *nf = *of;
-                ts->stick_held = 1;
-                ts->active++;
-                ts->stick_dx = sdx;
-                ts->stick_dy = sdy;
-                uint32_t sec = stick_sector(sdx, sdy, ts->stick_dead, of->sector);
-                if (sec != of->sector) stick_keys(of->sector, sec);
-                nf->sector = sec;
-            } else {
-                stick_keys(of->sector, 0); /* stick lost its spot: WASD up */
-            }
+            ts->stick_held = 1;
+            float ndx = rescale ? sdx * sxr : sdx, ndy = rescale ? sdy * syr : sdy;
+            ts->stick_dx = ndx;
+            ts->stick_dy = ndy;
+            uint32_t sec = stick_sector(ndx, ndy, ts->stick_dead, of->sector);
+            if (sec != of->sector) stick_keys(of->sector, sec);
+            nf->sector = sec;
         } else if (of->role == R_LOOK) {
-            if (lookers == 0 && nf && !hud_hit(ts->btns, ts->nbtn, of->lx, of->ly) &&
-                !in_zone(ts->zone, of->lx, of->ly)) {
-                *nf = *of;
-                lookers++;
-                ts->active++;
-            }
-            /* extra looks simply end; look has no held state to leak */
-        } else if (of->role == R_BTN) {
-            const Btn *ob = &oldb[i], *nb = ob->kind != 255 ? btn_by_id(ts, ob->id) : NULL;
-            int keep = nb && (ob->kind == K_MOUSE_HOLD || ob->kind == K_KEY_HOLD) &&
-                       of->lx >= nb->x && of->lx < nb->x + nb->w &&
-                       of->ly >= nb->y && of->ly < nb->y + nb->h;
-            if (keep && nf) {
-                *nf = *of; /* still pressed, still under the finger */
-                ts->active++;
-            } else {
-                apply_release(ob); /* gone/moved away: release, never latch */
-            }
+            nf->cx = nf->cy = 0; /* stale carry in old pixels: drop, not jump */
         }
     }
 }
@@ -715,7 +753,8 @@ static void ts_up(TouchState *ts, long fid) {
     if (!fr) return;
     if (fr->role == R_BTN) {
         const Btn *b = btn_by_id(ts, fr->btn_id);
-        if (b) apply_release(b);
+        /* another finger may still be holding the same button */
+        if (b && !other_btn_holder(ts, fid, fr->btn_id)) apply_release(b);
     } else if (fr->role == R_STICK) {
         stick_keys(fr->sector, 0);
         fr->sector = 0;
@@ -1255,6 +1294,71 @@ int main(void) {
               !vinput_keys()[DIK_S]);
     }
 
+    /* --- 11i. look survives a rebuild in empty space, deltas keep flowing --- */
+    {
+        int mx, my;
+        vinput_mouse_take(&mx, &my);
+        ts_down(&ts, 1160, W * 0.5f, H * 0.45f, W, H, now);
+        CHECK(finger_find(&ts, 1160) && finger_find(&ts, 1160)->role == R_LOOK);
+        ts_ensure_layout(&ts, W, H - 2, &s); /* tiny rebuild */
+        CHECK(finger_find(&ts, 1160) && finger_find(&ts, 1160)->role == R_LOOK);
+        ts_move(&ts, 1160, W * 0.5f + 30, H * 0.45f);
+        vinput_mouse_take(&mx, &my);
+        CHECK(mx == 30 && my == 0); /* the look finger did not die on the rebuild */
+        ts_up(&ts, 1160);
+        ts_ensure_layout(&ts, W, H, &s);
+    }
+
+    /* --- 11j. a look whose point lands on a button after a rebuild ends --- */
+    {
+        ts_down(&ts, 1165, 1220, 300, W, H, now); /* free spot at the default layout */
+        CHECK(finger_find(&ts, 1165) && finger_find(&ts, 1165)->role == R_LOOK);
+        Safe sb = s;
+        sb.bottom = 0.45f * H; /* pushes the bottom-anchored buttons up to it */
+        ts_ensure_layout(&ts, W, H, &sb);
+        CHECK(finger_find(&ts, 1165) == NULL); /* FOGO is under it now: dropped */
+        ts_ensure_layout(&ts, W, H, &s);
+    }
+
+    /* --- 11k. two fingers on FOGO: the hold drops only with the last one --- */
+    {
+        const Btn *f = tbtn(&ts, B_FOGO);
+        ts_down(&ts, 1170, f->x + 5, f->y + 5, W, H, now);
+        ts_down(&ts, 1171, f->x + f->w - 5, f->y + f->h - 5, W, H, now);
+        CHECK((vinput_mouse_buttons() & 1u) != 0);
+        ts_up(&ts, 1170);
+        CHECK((vinput_mouse_buttons() & 1u) != 0); /* the other finger keeps firing */
+        ts_up(&ts, 1171);
+        CHECK((vinput_mouse_buttons() & 1u) == 0);
+    }
+
+    /* --- 11l. rebuild splits two holders: kept finger keeps firing --- */
+    {
+        ts_ensure_layout(&ts, W, H, &s);
+        const Btn *run = tbtn(&ts, B_CORRER);
+        ts_down(&ts, 1180, run->x + run->w * 0.5f, run->y + 14, W, H, now); /* stays under */
+        ts_down(&ts, 1181, run->x + run->w * 0.5f, run->y + run->h - 6, W, H, now); /* leaves */
+        CHECK(vinput_keys()[DIK_LSHIFT]);
+        ts_ensure_layout(&ts, W, H - 60, &s);
+        CHECK(finger_find(&ts, 1180) && finger_find(&ts, 1180)->role == R_BTN);
+        CHECK(vinput_keys()[DIK_LSHIFT]); /* the sibling's release must not kill it */
+        ts_up(&ts, 1180);
+        CHECK(!vinput_keys()[DIK_LSHIFT]);
+        ts_up(&ts, 1181);
+        ts_ensure_layout(&ts, W, H, &s);
+    }
+
+    /* --- 11m. a grid left open dies with the layout that had it --- */
+    {
+        const Btn *sl2 = tbtn(&ts, B_SLOTS);
+        ts_down(&ts, 1185, sl2->x + sl2->w / 2, sl2->y + sl2->h / 2, W, H, now);
+        ts_up(&ts, 1185);
+        CHECK(ts.grid_open);
+        ts_ensure_layout(&ts, 200, 200, &s); /* no grid fits */
+        CHECK(!ts.grid_open && ts.ngrid == 0);
+        ts_ensure_layout(&ts, W, H, &s);
+    }
+
     /* --- 12. pend overflow: the 9th distinct pending tap releases at once --- */
     {
         uint32_t e0 = vinput_key_edges();
@@ -1664,9 +1768,15 @@ extern "C" void touch_handle_event(const SDL_Event *e) {
     case SDL_FINGERDOWN: {
         int w, h;
         win_size(&w, &h);
-        if (w > 0 && h > 0)
+        if (w > 0 && h > 0) {
+            /* fresh insets for the rebuild this DOWN may trigger: using the
+             * cached ones would lay the HUD out one frame in the past */
+            Safe s;
+            overlay_safe(&s, w, h);
+            g_ts.safe = s;
             ts_down(&g_ts, (long)e->tfinger.fingerId, e->tfinger.x * w, e->tfinger.y * h, w, h,
                     SDL_GetTicks());
+        }
         break;
     }
     case SDL_FINGERMOTION: {
