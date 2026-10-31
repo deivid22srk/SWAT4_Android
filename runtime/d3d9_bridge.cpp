@@ -298,6 +298,9 @@ void B_IDirect3D9_CreateDevice(CPU *c) {
     if (g_bridge_dev) {
         hr = g_bridge_dev->Reset(&pp);
         pp_to_guest(&pp, ARG(5));
+        /* client == backbuffer on this path too (direct Reset, not the shim) */
+        if (SUCCEEDED(hr) && pp.BackBufferWidth && pp.BackBufferHeight)
+            user32_set_screen((int)pp.BackBufferWidth, (int)pp.BackBufferHeight);
         if (ARG(6)) M32(ARG(6)) = d3d9_wrap(g_bridge_dev, IFACE_IDirect3DDevice9);
         LOG("CreateDevice(reuse+reset) -> %08x", (uint32_t)hr);
         RET(hr, 7);
