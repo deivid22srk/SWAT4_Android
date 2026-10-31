@@ -1014,3 +1014,52 @@ Correções (commit "d3d9: one host device..."):
 * Chegar perto de uma porta → chip PORTA aparece (fade ~120 ms); o toque
   dispara o mesmo caminho da tecla F física (menu contextual de porta do
   próprio jogo); afastar-se → some.
+
+## 2026-11-01 — HUD Java sempre visível: todos os botões, todo o tempo
+
+Pedido do usuário ("faça com que todos os botões seja mostrado a todos
+tempo", confirmando o HUD Java sobreposto como a proposta certa).
+
+### Mudança (`HudOverlay.java`, um arquivo)
+
+O HUD completo — **17 controles: stick fixo, FOGO, CMD, SLOTS, USAR, PORTA,
+REC, ZOOM, MODO, AGACH, CORRER, INC<, INC>, TAB, ESP, ESC, TROCA + grade
+1-0/F1-F10** — passa a ser desenhado e a funcionar em **todos os contextos**:
+
+* **Desenho**: `onDraw` não tem mais ramificação por contexto — stick +
+  todos os botões em missão, menu, vídeo Bink e loading (o View Java é
+  compostos pela sistema ACIMA da surface do jogo, então aparece sobre
+  qualquer swapchain). Antes: MENU desenhava só o chip ESC e UNKNOWN não
+  desenhava nada.
+* **Toque**: `down()` testa botões ANTES de qualquer outra coisa, em todos
+  os contextos. Dedo livre: missão = look; menu/boot = mouse do jogo
+  (`EV_MMOVE`/`EV_MENUCLICK` nas coordenadas do cliente guest); stick =
+  WASD na missão, setas no menu.
+* **PORTA**: deixa de ser ocultado por proximidade — sempre visível,
+  sempre ativo (F do jogo); `hud_door_near` agora só acende o realce azul
+  quando há porta real em 128 unidades.
+* **Chave `always_show` removida** do `hud.ini` (v2): o comportamento é
+  incondicional; chave antiga em arquivo existente é ignorada no parse e
+  não volta no rewrite.
+* **Segurança**: `releaseAll()` agora roda em QUALQUER troca de contexto
+  (antes só ao sair de missão) — nenhum hold (FOGO/CORRER/INC) sobrevive
+  a missão→menu→vídeo.
+
+### Validação local
+
+* `ecj` (source 17) sobre `HudOverlay.java` + `HudBridge.java` com stubs
+  Android mínimos: **0 erros**;
+* `sh scripts/test_hud.sh` — `hud_jni selftest: ok`, `hud_state selftest:
+  ok`, contrato de símbolos vinput: ok (runtime não mudou);
+* Verificação de balanceamento e de referências órfãs (`cfgAlwaysShow`,
+  `always_show`): limpa.
+
+### O que esperar no aparelho
+
+* Menu principal: TODOS os botões visíveis sobre o menu; tocar Career/
+  Training direto com o dedo fora dos botões/stick funciona (mouse do
+  jogo); ESC no canto superior direito; stick = setas para navegar.
+* Vídeo de abertura: HUD inteiro visível; **ESC pula o vídeo** (Esc do
+  próprio jogo), TROCA/TAB etc. ignorados pelo player — inofensivo.
+* Missão: idêntico ao build anterior (stick, look, botões, grade), com
+  PORTA sempre presente (realce azul perto de porta real).

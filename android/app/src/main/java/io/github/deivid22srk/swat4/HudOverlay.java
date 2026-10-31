@@ -29,17 +29,23 @@ import java.io.IOException;
  * reports), sized in dp, and the stick is a fixed, always-visible anchor
  * instead of appearing only under a dragged finger.
  *
- * Contextual behaviour comes from REAL game state (HudBridge.poll ->
- * hud_state.cpp scans the engine's own object array):
- *   MISSION — stick (WASD sectors with hysteresis), look drag, the action
- *             buttons, the door chip (PORTA) only while a real ASwatDoor
- *             is within the game's own Use range, and the slots grid.
- *   MENU    — the HUD hides; every finger becomes the game's own mouse
- *             (WM mouse at guest-client coordinates), the stick becomes
- *             the menu arrow keys, and a small ESC chip sits top-right
- *             (skips intro movies / backs out — the game's own Esc).
- *   UNKNOWN — guest not readable yet (boot/loading): touches become menu
- *             clicks too (harmless), nothing is drawn.
+ * The FULL HUD is always visible and always active, in EVERY context —
+ * user requirement: "todos os botões mostrados a todo tempo". The stick
+ * and every button, PORTA and ESC included, draw through missions, menus,
+ * Bink movies and loading frames alike, and every one of them works
+ * anywhere. What the REAL game state (HudBridge.poll -> hud_state.cpp
+ * scans the engine's own object array) still decides is what a FREE
+ * finger does:
+ *   MISSION — free fingers look around; the stick is movement (WASD
+ *             sectors with hysteresis).
+ *   MENU    — free fingers are the game's own mouse (WM mouse at
+ *             guest-client coordinates: direct Career/Training taps); the
+ *             stick is the menu arrow keys.
+ *   UNKNOWN — same as MENU (harmless: the guest ignores what it cannot
+ *             use yet).
+ * PORTA keeps a visual accent while a real ASwatDoor sits within the
+ * game's own Use range (hud_door_near), but the button itself never
+ * hides and its F always fires.
  *
  * Every control sends the game's own input through HudBridge.post (a
  * lock-free SPSC ring drained by the game thread): mouse buttons, DIK key
@@ -53,8 +59,7 @@ import java.io.IOException;
 public class HudOverlay extends View {
     /* ---------------- config (hud.ini) ---------------- */
     private float cfgScale = 1.0f, cfgOpacity = 0.55f, cfgSens = 1.0f, cfgStick = 1.0f;
-    private boolean cfgInvertY, cfgHanded, cfgLabels = true, cfgHoldCrouch, cfgHoldZoom,
-            cfgAlwaysShow;
+    private boolean cfgInvertY, cfgHanded, cfgLabels = true, cfgHoldCrouch, cfgHoldZoom;
 
     /* ---------------- DIK (set-1) codes used by the layout ---------------- */
     private static final int DIK_ESC = 0x01, DIK_1 = 0x02, DIK_0 = 0x0B, DIK_TAB = 0x0F,
@@ -206,7 +211,7 @@ public class HudOverlay extends View {
                     case "labels": cfgLabels = parseInt(v) != 0; break;
                     case "hold_crouch": cfgHoldCrouch = parseInt(v) != 0; break;
                     case "hold_zoom": cfgHoldZoom = parseInt(v) != 0; break;
-                    case "always_show": cfgAlwaysShow = parseInt(v) != 0; break;
+                    /* "always_show" (v2) is gone: the HUD is always shown */
                     default: break;
                 }
             }
@@ -232,7 +237,6 @@ public class HudOverlay extends View {
                 w.write("labels=" + (cfgLabels ? 1 : 0) + "\n");
                 w.write("hold_crouch=" + (cfgHoldCrouch ? 1 : 0) + "\n");
                 w.write("hold_zoom=" + (cfgHoldZoom ? 1 : 0) + "\n");
-                w.write("always_show=" + (cfgAlwaysShow ? 1 : 0) + "\n");
             }
         } catch (IOException ignored) {
         }
@@ -413,7 +417,7 @@ public class HudOverlay extends View {
                 guestW = pollOut[1];
                 guestH = pollOut[2];
                 if (nctx != ctx) {
-                    if (ctx == HudBridge.CTX_MISSION) releaseAll(); /* drop holds */
+                    releaseAll(); /* buttons live everywhere: drop holds on any flip */
                     ctx = nctx;
                     changed = true;
                 }
@@ -490,7 +494,7 @@ public class HudOverlay extends View {
                 guestW = pollOut[1];
                 guestH = pollOut[2];
                 if (nctx != ctx) {
-                    if (ctx == HudBridge.CTX_MISSION) releaseAll();
+                    releaseAll();
                     ctx = nctx;
                     invalidate();
                 }
@@ -540,54 +544,42 @@ public class HudOverlay extends View {
         p.lx = x;
         p.ly = y;
 
-        boolean mission = ctx == HudBridge.CTX_MISSION || cfgAlwaysShow;
-        if (mission) {
-            int bi = hitBase(x, y);
-            if (bi >= 0) {
-                p.role = R_BTN;
-                pressBtn(p, bi);
-            } else if (gridOpen) {
-                int gi = hitGrid(x, y);
-                p.role = R_BTN;
+        /* buttons live in EVERY context (always visible, always active):
+         * hit test first, then the grid, then the stick zone; a free
+         * finger looks around in missions and is the game's own mouse in
+         * menus, movies and boot. */
+        int bi = hitBase(x, y);
+        if (bi >= 0) {
+            p.role = R_BTN;
+            pressBtn(p, bi);
+        } else if (gridOpen) {
+            int gi = hitGrid(x, y);
+            p.role = R_BTN;
+            p.btn = -1;
+            if (gi >= 0) {
+                pressGrid(p, gi);
+            } else if (gi == -1) {
+                gridOpen = false; /* tap outside the panel closes it */
+                invalidate();
+            }
+            /* gi == -2: inside the panel between slots: consume, do nothing */
+        } else if (inZone(x, y)) {
+            if (stickHeld) {
+                p.role = R_BTN;   /* second stick finger: consumed */
                 p.btn = -1;
-                if (gi >= 0) {
-                    pressGrid(p, gi);
-                } else if (gi == -1) {
-                    gridOpen = false; /* tap outside the panel closes it */
-                    invalidate();
-                }
-                /* gi == -2: inside the panel between slots: consume, do nothing */
-            } else if (inZone(x, y)) {
-                if (stickHeld) {
-                    p.role = R_BTN;   /* second stick finger: consumed */
-                    p.btn = -1;
-                } else {
-                    p.role = R_STICK;
-                    p.sx = x;
-                    p.sy = y;
-                    stickHeld = true;
-                    stickVX = stickVY = 0;
-                }
             } else {
-                p.role = R_LOOK;
+                p.role = R_STICK;
+                p.sx = x;
+                p.sy = y;
+                stickHeld = true;
+                stickVX = stickVY = 0;
             }
-        } else { /* MENU / UNKNOWN: fingers are the game's mouse; stick navigates */
-            if (inZone(x, y)) {
-                if (stickHeld) {
-                    p.role = R_BTN;   /* second stick finger: consumed */
-                    p.btn = -1;
-                } else {
-                    p.role = R_STICK;
-                    p.sx = x;
-                    p.sy = y;
-                    stickHeld = true;
-                    stickVX = stickVY = 0;
-                }
-            } else {
-                p.role = R_MENU;
-                menuMove(x, y);
-                if (++nMenuFingers == 1) HudBridge.post(HudBridge.EV_MENUCLICK, 1, 0);
-            }
+        } else if (ctx == HudBridge.CTX_MISSION) {
+            p.role = R_LOOK;
+        } else { /* MENU / UNKNOWN: the finger is the game's mouse */
+            p.role = R_MENU;
+            menuMove(x, y);
+            if (++nMenuFingers == 1) HudBridge.post(HudBridge.EV_MENUCLICK, 1, 0);
         }
         invalidate();
     }
@@ -747,7 +739,7 @@ public class HudOverlay extends View {
 
     private int hitBase(float x, float y) {
         for (int i = 0; i < B_NBASE; i++) {
-            if (i == B_PORTA && !doorNear) continue; /* context-gated */
+            /* PORTA is never hidden; doorNear only brightens it */
             if (x >= bx[i] && x < bx[i] + bsz[i] && y >= by[i] && y < by[i] + bsz[i]) return i;
         }
         return -1;
@@ -787,7 +779,7 @@ public class HudOverlay extends View {
         stickSector = cur;
         int delta = old ^ cur;
         if (delta == 0) return;
-        boolean menu = ctx != HudBridge.CTX_MISSION && !cfgAlwaysShow;
+        boolean menu = ctx != HudBridge.CTX_MISSION;
         for (int i = 0; i < 4; i++) {
             int bit = 1 << i;
             if ((delta & bit) == 0) continue;
@@ -837,31 +829,25 @@ public class HudOverlay extends View {
     @Override
     protected void onDraw(Canvas canvas) {
         super.onDraw(canvas);
-        boolean mission = ctx == HudBridge.CTX_MISSION || cfgAlwaysShow;
         int alpha = (int) (255 * cfgOpacity);
 
-        if (mission) {
-            /* stick: fixed anchor, always visible (ghost knob when idle) */
-            float lw = Math.max(2f, u * 1.2f);
-            pCircle.setColor(Color.argb(alpha / 3, 0, 0, 0));
-            canvas.drawCircle(anchorX, anchorY, stickR, pCircle);
-            pStroke.setStrokeWidth(lw);
-            pStroke.setColor(Color.argb(alpha / 2, 255, 255, 255));
-            canvas.drawCircle(anchorX, anchorY, stickR, pStroke);
-            pCircle.setColor(Color.argb(Math.min(255, alpha + 60), 235, 235, 235));
-            canvas.drawCircle(anchorX + stickVX, anchorY + stickVY, stickR * 0.38f, pCircle);
+        /* stick: fixed anchor, visible in EVERY context (ghost knob when
+         * idle); in missions it moves, in menus it navigates */
+        float lw = Math.max(2f, u * 1.2f);
+        pCircle.setColor(Color.argb(alpha / 3, 0, 0, 0));
+        canvas.drawCircle(anchorX, anchorY, stickR, pCircle);
+        pStroke.setStrokeWidth(lw);
+        pStroke.setColor(Color.argb(alpha / 2, 255, 255, 255));
+        canvas.drawCircle(anchorX, anchorY, stickR, pStroke);
+        pCircle.setColor(Color.argb(Math.min(255, alpha + 60), 235, 235, 235));
+        canvas.drawCircle(anchorX + stickVX, anchorY + stickVY, stickR * 0.38f, pCircle);
 
-            for (int i = 0; i < B_NBASE; i++) {
-                if (i == B_PORTA && !doorNear) continue;
-                drawBtn(canvas, BASE[i].label, bx[i], by[i], bsz[i], pressed[i],
-                        i == B_PORTA, alpha);
-            }
-            if (gridOpen) drawGrid(canvas, alpha);
-        } else if (ctx == HudBridge.CTX_MENU) {
-            /* menu/movie toolbar: the game's own Esc (skip video, go back) */
-            drawBtn(canvas, "ESC", bx[B_ESC], by[B_ESC], bsz[B_ESC], false, false, alpha);
+        /* every button, in EVERY context (PORTA brightens near a door) */
+        for (int i = 0; i < B_NBASE; i++) {
+            drawBtn(canvas, BASE[i].label, bx[i], by[i], bsz[i], pressed[i],
+                    i == B_PORTA && doorNear, alpha);
         }
-        /* CTX_UNKNOWN: draw nothing (boot/loading) */
+        if (gridOpen) drawGrid(canvas, alpha);
     }
 
     private void drawBtn(Canvas c, String label, float x, float y, float sz, boolean down,
