@@ -11,7 +11,7 @@ STUBS="$ROOT/scripts/selftest_stubs.c"
 cd "$ROOT"
 
 mkdir -p /tmp/sdlinc/SDL2
-cp -n android/app/jni/SDL2/include/*.h /tmp/sdlinc/SDL2/ 2>/dev/null || true
+cp android/app/jni/SDL2/include/*.h /tmp/sdlinc/SDL2/ 2>/dev/null || true
 
 CF="-DGAME_SWAT4 -std=gnu11 -O1 -fno-strict-aliasing -fwrapv -Iruntime -I/tmp/sdlinc -Wall -Wno-unused-function"
 CX="-DGAME_SWAT4 -std=c++17 -O1 -Iruntime -I/tmp/sdlinc -DDXVK_NATIVE -Iandroid/app/jni/dxvk/include/native/directx -Iandroid/app/jni/dxvk/include/native/windows -Wno-everything"

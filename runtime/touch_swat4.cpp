@@ -301,6 +301,10 @@ static void hud_safe_defaults(Safe *s, int w, int h) {
     (void)w;
 }
 
+/* Buttons are at least 5.5% of the screen height so they stay tappable at
+ * any resolution and scale setting (shared by the fit loop and hud_sz). */
+#define HUD_MIN_BTN(h) (0.055f * (h))
+
 /* Layout unit: h/720 scaled by config, fitted so the right column
  * (FOGO+CMD+3xSLOTS/TAB/ESP) plus the top row always fit between the safe
  * insets. Sizes have a 0.055h floor each, which makes the stack height
@@ -310,19 +314,21 @@ static float hud_unit(const HudCfg *cfg, int w, int h, const Safe *s) {
     float avail = h - s->top - s->bottom;
     float u = h / 720.0f * cfg->scale;
     for (int i = 0; i < 2; i++) {
-        float f = maxf(150 * u, 0.055f * h), c = maxf(100 * u, 0.055f * h);
-        float sm = maxf(56 * u, 0.055f * h), e = maxf(64 * u, 0.055f * h);
+        float f = maxf(150 * u, HUD_MIN_BTN(h)), c = maxf(100 * u, HUD_MIN_BTN(h));
+        float sm = maxf(56 * u, HUD_MIN_BTN(h)), e = maxf(64 * u, HUD_MIN_BTN(h));
         float g = 10 * u;
-        float need = f + c + 3 * sm + 5 * g + e; /* 4 stack gaps + 1 clearance */
+        /* SLOTS, TAB and ESP are the three sm-sized buttons of the right
+         * column; the extra g is the clearance to the top row. Overestimating
+         * here is what absorbs the residual of the 2-pass fit at extremes. */
+        float need = f + c + 3 * sm + 5 * g + e;
         if (need <= avail) break;
         u *= avail / need;
     }
     return u;
 }
 
-/* Buttons are at least 5.5% of the screen height so they stay tappable at
- * any resolution and scale setting. */
-static float hud_sz(float units, float u, int h) { return maxf(units * u, 0.055f * h); }
+/* Buttons are at least 5.5% of the screen height (HUD_MIN_BTN above). */
+static float hud_sz(float units, float u, int h) { return maxf(units * u, HUD_MIN_BTN(h)); }
 
 static void btn_set(Btn *b, int id, int kind, int dik, int mbtn, const char *label, float x, float y, float w, float h) {
     b->id = (uint8_t)id;
@@ -492,14 +498,32 @@ static void apply_release(const Btn *b) {
     }
 }
 
-/* (Re)build the layouts when the window size or safe area changed. A real
- * rebuild moves buttons out from under pressed fingers, so everything is
- * released first: no key or mouse button can be left latched by a resize. */
+/* (Re)build the layouts when the window size or safe area changed. Live
+ * fingers are re-attached to the new rects instead of being dropped: a
+ * one-frame flap of the safe area (or a real resize) must not release a
+ * held FOGO. Holds whose button is gone from under the finger are released
+ * with their OLD definition, so nothing can stay latched either. */
 static void ts_release_all(TouchState *ts, uint32_t now);
+static int in_zone(const float *z, float x, float y);
 static void ts_ensure_layout(TouchState *ts, int w, int h, const Safe *s) {
     if (ts->nbtn && ts->w == w && ts->h == h &&
         !memcmp(&ts->safe, s, sizeof(*s))) return;
-    if (ts->nbtn) ts_release_all(ts, 0);
+    int had = ts->nbtn != 0;
+    Finger live[TOUCH_MAXF];
+    Btn oldb[TOUCH_MAXF];
+    float sdx = ts->stick_dx, sdy = ts->stick_dy;
+    int nlive = 0;
+    if (had) {
+        for (int i = 0; i < TOUCH_MAXF; i++) {
+            Finger *fr = &ts->f[i];
+            if (fr->role == R_NONE || fr->role == R_CONSUMED) continue;
+            live[nlive] = *fr;
+            const Btn *b = fr->role == R_BTN ? btn_by_id(ts, fr->btn_id) : NULL;
+            if (b) oldb[nlive] = *b;
+            else { memset(&oldb[nlive], 0, sizeof oldb[nlive]); oldb[nlive].kind = 255; }
+            nlive++;
+        }
+    }
     ts->w = w;
     ts->h = h;
     ts->safe = *s;
@@ -513,6 +537,54 @@ static void ts_ensure_layout(TouchState *ts, int w, int h, const Safe *s) {
         ts->zone[0] = (w - s->right) - (ts->zone[0] - s->left) - ts->zone[2];
     ts->stick_r = ts->cfg.stick_radius * 0.16f * h;
     ts->stick_dead = 0.12f * ts->stick_r;
+    if (!had) return;
+
+    /* Forget the fingers (held state stays as it is for now) and re-attach
+     * what still fits; the pend table is untouched, taps drain on time. */
+    memset(ts->f, 0, sizeof ts->f);
+    ts->active = 0;
+    ts->stick_held = 0;
+    ts->stick_dx = ts->stick_dy = 0;
+    int lookers = 0;
+    for (int i = 0; i < nlive; i++) {
+        Finger *of = &live[i];
+        Finger *nf = NULL;
+        for (int k = 0; k < TOUCH_MAXF && !nf; k++)
+            if (ts->f[k].role == R_NONE) nf = &ts->f[k];
+        if (of->role == R_STICK) {
+            if (ts->stick_held == 0 && nf && in_zone(ts->zone, of->ox, of->oy)) {
+                *nf = *of;
+                ts->stick_held = 1;
+                ts->active++;
+                ts->stick_dx = sdx;
+                ts->stick_dy = sdy;
+                uint32_t sec = stick_sector(sdx, sdy, ts->stick_dead, of->sector);
+                if (sec != of->sector) stick_keys(of->sector, sec);
+                nf->sector = sec;
+            } else {
+                stick_keys(of->sector, 0); /* stick lost its spot: WASD up */
+            }
+        } else if (of->role == R_LOOK) {
+            if (lookers == 0 && nf && !hud_hit(ts->btns, ts->nbtn, of->lx, of->ly) &&
+                !in_zone(ts->zone, of->lx, of->ly)) {
+                *nf = *of;
+                lookers++;
+                ts->active++;
+            }
+            /* extra looks simply end; look has no held state to leak */
+        } else if (of->role == R_BTN) {
+            const Btn *ob = &oldb[i], *nb = ob->kind != 255 ? btn_by_id(ts, ob->id) : NULL;
+            int keep = nb && (ob->kind == K_MOUSE_HOLD || ob->kind == K_KEY_HOLD) &&
+                       of->lx >= nb->x && of->lx < nb->x + nb->w &&
+                       of->ly >= nb->y && of->ly < nb->y + nb->h;
+            if (keep && nf) {
+                *nf = *of; /* still pressed, still under the finger */
+                ts->active++;
+            } else {
+                apply_release(ob); /* gone/moved away: release, never latch */
+            }
+        }
+    }
 }
 
 static int in_zone(const float *z, float x, float y) {
@@ -523,6 +595,13 @@ static Finger *finger_find(TouchState *ts, long id) {
     for (int i = 0; i < TOUCH_MAXF; i++)
         if (ts->f[i].role != R_NONE && ts->f[i].id == id) return &ts->f[i];
     return NULL;
+}
+
+static int looker_count(const TouchState *ts) {
+    int n = 0;
+    for (int i = 0; i < TOUCH_MAXF; i++)
+        if (ts->f[i].role == R_LOOK) n++;
+    return n;
 }
 
 static void ts_down(TouchState *ts, long fid, float x, float y, int w, int h, uint32_t now) {
@@ -562,6 +641,8 @@ static void ts_down(TouchState *ts, long fid, float x, float y, int w, int h, ui
     if (bi >= 0) {
         fr->role = R_BTN;
         fr->btn_id = ts->btns[bi].id;
+        fr->lx = x; /* remembered so a layout rebuild can re-attach the hold */
+        fr->ly = y;
         apply_press(ts, &ts->btns[bi], now);
         if (ts->btns[bi].id == B_SLOTS) {
             ts->grid_open = 1;
@@ -580,6 +661,13 @@ static void ts_down(TouchState *ts, long fid, float x, float y, int w, int h, ui
         fr->oy = y; /* floating stick: the origin is where the finger landed */
         ts->stick_held++;
     } else {
+        /* one looker at a time: a second look finger (palm edge, flick
+         * hand-off) would double the camera deltas */
+        if (looker_count(ts) > 0) {
+            fr->role = R_CONSUMED;
+            ts->active++;
+            return;
+        }
         fr->role = R_LOOK;
         fr->lx = x;
         fr->ly = y;
@@ -1081,17 +1169,90 @@ int main(void) {
         CHECK(!vinput_keys()[DIK_W] && !vinput_keys()[DIK_D]);
     }
 
-    /* --- 11d. resize while holding releases everything (no latched keys) --- */
+    /* --- 11d. rebuild re-attaches holds still under the finger; moved-away
+     * or vanished holds are released (never latched) --- */
     {
         const Btn *run = tbtn(&ts, B_CORRER);
         ts_down(&ts, 1116, run->x + run->w / 2, run->y + run->h / 2, W, H, now);
         CHECK(vinput_keys()[DIK_LSHIFT]);
-        ts_ensure_layout(&ts, W, H - 40, &s); /* a real rebuild */
-        CHECK(!vinput_keys()[DIK_LSHIFT]); /* hold released by the rebuild */
-        CHECK(ts.nbtn == 15);
+        ts_ensure_layout(&ts, W, H - 2, &s); /* 2 px: button still under it */
+        CHECK(vinput_keys()[DIK_LSHIFT]); /* hold kept through the rebuild */
+        CHECK(finger_find(&ts, 1116) && finger_find(&ts, 1116)->role == R_BTN);
+        ts_ensure_layout(&ts, W, H - 60, &s); /* the rect moved out from under */
+        CHECK(!vinput_keys()[DIK_LSHIFT]); /* released, not latched */
         ts_up(&ts, 1116); /* late UP: ignored */
         CHECK(!vinput_keys()[DIK_LSHIFT]);
+        /* layout destroyed entirely (tiny window): nothing stays pressed */
+        ts_ensure_layout(&ts, W, H, &s); /* restore before pressing again */
+        const Btn *run2 = tbtn(&ts, B_CORRER);
+        ts_down(&ts, 1118, run2->x + run2->w / 2, run2->y + run2->h / 2, W, H, now);
+        CHECK(vinput_keys()[DIK_LSHIFT]);
+        ts_ensure_layout(&ts, 200, 200, &s); /* below the 320x240 floor */
+        CHECK(ts.nbtn == 0 && !vinput_keys()[DIK_LSHIFT]);
+        ts_up(&ts, 1118);
         ts_ensure_layout(&ts, W, H, &s); /* restore */
+    }
+
+    /* --- 11e. a second look finger is consumed (no doubled camera) --- */
+    {
+        int mx, my;
+        vinput_mouse_take(&mx, &my);
+        ts_down(&ts, 1120, W * 0.5f, H * 0.45f, W, H, now);
+        ts_down(&ts, 1121, W * 0.52f, H * 0.45f, W, H, now); /* palm/flick overlap */
+        CHECK(finger_find(&ts, 1121)->role == R_CONSUMED);
+        ts_move(&ts, 1120, W * 0.5f + 30, H * 0.45f);
+        ts_move(&ts, 1121, W * 0.52f + 30, H * 0.45f); /* ignored */
+        vinput_mouse_take(&mx, &my);
+        CHECK(mx == 30 && my == 0);
+        ts_up(&ts, 1120);
+        ts_up(&ts, 1121);
+        /* hand-off: after the look lifts, a new finger may look again */
+        ts_down(&ts, 1122, W * 0.5f, H * 0.45f, W, H, now);
+        CHECK(finger_find(&ts, 1122)->role == R_LOOK);
+        ts_up(&ts, 1122);
+    }
+
+    /* --- 11f. stick losing its spot in a rebuild releases WASD --- */
+    {
+        ts_down(&ts, 1125, ts.zone[0] + 60, 500, W, H, now); /* 0.69 h: in zone */
+        ts_move(&ts, 1125, ts.zone[0] + 120, 440);
+        CHECK(vinput_keys()[DIK_W] && vinput_keys()[DIK_D]);
+        ts_ensure_layout(&ts, W, 432, &s); /* the zone no longer holds 500 px */
+        CHECK(!vinput_keys()[DIK_W] && !vinput_keys()[DIK_D]);
+        ts_up(&ts, 1125);
+        ts_ensure_layout(&ts, W, H, &s);
+    }
+
+    /* --- 11g. hud.ini round trip: hold_crouch/hold_zoom reach the layout --- */
+    {
+        FILE *f = fopen("/tmp/ts_test_hold.ini", "w");
+        CHECK(f != NULL);
+        if (f) {
+            fputs("hold_crouch=1\nhold_zoom=1\n", f);
+            fclose(f);
+        }
+        TouchState th;
+        ts_init(&th, "/tmp/ts_test_hold.ini");
+        th.nbtn = 0;
+        ts_ensure_layout(&th, W, H, &s);
+        CHECK(tbtn(&th, B_AGACH)->kind == K_KEY_HOLD);
+        CHECK(tbtn(&th, B_ZOOM)->kind == K_KEY_HOLD);
+        const Btn *rec2 = tbtn(&th, B_REC);
+        CHECK(rec2->kind == K_KEY_TAP); /* others unaffected */
+    }
+
+    /* --- 11h. consumed fingers vanish in release_all (no ghost count) --- */
+    {
+        float sx = ts.zone[0] + ts.zone[2] * 0.5f, sy = ts.zone[1] + ts.zone[3] * 0.5f;
+        ts_down(&ts, 1130, sx, sy, W, H, now);
+        ts_down(&ts, 1131, sx + 10, sy + 10, W, H, now); /* 2nd stick: consumed */
+        CHECK(finger_find(&ts, 1131)->role == R_CONSUMED);
+        CHECK(ts.active == 2);
+        ts_release_all(&ts, now);
+        CHECK(ts.active == 0 && ts.stick_held == 0);
+        for (int i = 0; i < TOUCH_MAXF; i++) CHECK(ts.f[i].role == R_NONE);
+        CHECK(!vinput_keys()[DIK_W] && !vinput_keys()[DIK_D] && !vinput_keys()[DIK_A] &&
+              !vinput_keys()[DIK_S]);
     }
 
     /* --- 12. pend overflow: the 9th distinct pending tap releases at once --- */
@@ -1115,18 +1276,25 @@ int main(void) {
               !vinput_keys()[DIK_DEL]);
     }
 
-    /* --- 13. no two base buttons overlap (3 scales + mirrored, 3 aspect ratios) --- */
+    /* --- 13. no two base buttons overlap (3 scales + mirrored, 3 aspect ratios,
+     * default insets and one big-notch case) --- */
     {
         const int ws[3] = {W, 1024, 1280}, hs[3] = {H, 768, 800}; /* 16:9, 4:3, 16:10 */
         for (int r = 0; r < 3; r++)
-        for (int pass = 0; pass < 4; pass++) {
+        for (int pass = 0; pass < 5; pass++) {
             HudCfg c;
             hud_cfg_defaults(&c);
-            c.scale = pass == 0 ? 0.5f : pass == 1 ? 1.0f : 2.0f;
+            c.scale = pass == 0 ? 0.5f : pass == 1 ? 1.0f : pass == 2 ? 2.0f : 1.0f;
             c.handed = pass == 3;
             Btn bs[15];
             Safe sr;
-            hud_safe_defaults(&sr, ws[r], hs[r]);
+            if (pass == 4) { /* a big notch + bars, inside the sanity cap */
+                sr.top = 0.25f * hs[r];
+                sr.bottom = 0.03f * hs[r];
+                sr.left = sr.right = 0.05f * ws[r];
+            } else {
+                hud_safe_defaults(&sr, ws[r], hs[r]);
+            }
             CHECK(hud_layout(&c, ws[r], hs[r], &sr, bs, 15) == 15);
             int ok = 1;
             for (int i = 0; i < 15 && ok; i++)
@@ -1465,10 +1633,16 @@ extern "C" int touch_available(void) {
 
 extern "C" void touch_notify_reset(void) {
     /* Font atlas lives in D3DPOOL_MANAGED and survives Reset; the per-draw
-     * state save/restore captures whatever the device holds at Present time,
-     * so there is nothing to rebuild. Kept as a hook for future needs. */
-    g_font_fails = 0; /* a reset also clears transient init failures */
-    OLOG("overlay: device reset (managed resources survive)");
+     * state save/restore captures whatever the device holds at Present time. */
+    g_font_fails = 0;
+    if (g_disabled) {
+        /* the give-up path is also transient: a successful Reset means the
+         * device is back, so let the next Present try the font again */
+        g_disabled = 0;
+        OLOG("overlay: device reset, overlay re-enabled");
+    } else {
+        OLOG("overlay: device reset (managed resources survive)");
+    }
 }
 
 extern "C" void touch_release_all(void) {
