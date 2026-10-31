@@ -447,7 +447,7 @@ namespace {
  * MEM+9). */
 constexpr size_t SHADOW_SLACK = 16, SHADOW_CANARY = 32;
 
-struct Shadow { uint32_t guest; void *host; size_t size; DWORD flags; bool persist; const char *tag; };
+struct Shadow { uint32_t guest; void *host; size_t size; DWORD flags; bool persist; const char *tag; int va; };
 std::map<std::pair<void *, uint32_t>, Shadow> g_shadows;
 std::mutex g_shadow_lock;
 
@@ -455,7 +455,7 @@ std::mutex g_shadow_lock;
 // (and Bink's frame buffers) keep writing through the pointer after unlock,
 // which is valid on Windows for D3DPOOL_SYSTEMMEM. The buffer is copied to
 // the host object on unlock and again before it is used as an update source.
-struct Persist { uint32_t guest; size_t size; std::function<void(const uint8_t *)> upload; const char *tag; };
+struct Persist { uint32_t guest; size_t size; std::function<void(const uint8_t *)> upload; const char *tag; int va; };
 std::map<std::pair<void *, uint32_t>, Persist> g_persist;
 
 // Vertex/index (and plain) locks keep one cached guest buffer per object+sub
@@ -464,8 +464,10 @@ std::map<std::pair<void *, uint32_t>, Persist> g_persist;
 // after unlock (as it may legally do on Windows) a freed block corrupts the
 // heap; a cached block just keeps the stale bytes until the next lock of the
 // same object reuses it. Freed by shadow_forget on Release.
-struct BufShadow { uint32_t guest; size_t cap; }; // cap = full allocation size
+struct BufShadow { uint32_t guest; size_t cap; int va; }; // cap = full allocation size
 std::map<std::pair<void *, uint32_t>, BufShadow> g_buf_shadow;
+
+void shadow_free(uint32_t p, int va) { gbigfree(p, va); }
 
 void canary_fill(uint32_t g, size_t size) {
     memset(MEM + g + size + SHADOW_SLACK, 0xA9, SHADOW_CANARY);
@@ -489,6 +491,7 @@ uint32_t shadow_begin(void *obj, uint32_t sub, void *hostbits, size_t size, DWOR
                       std::function<void(const uint8_t *)> upload = nullptr,
                       const char *tag = nullptr) {
     uint32_t g = 0;
+    int pva = 0;
     bool persist = upload != nullptr;
     std::lock_guard<std::mutex> l(g_shadow_lock);
     if (persist) {
@@ -496,13 +499,13 @@ uint32_t shadow_begin(void *obj, uint32_t sub, void *hostbits, size_t size, DWOR
         if (it != g_persist.end() && it->second.size == size) {
             g = it->second.guest; // guest copy is authoritative
         } else {
-            if (it != g_persist.end()) gfree(it->second.guest);
+            if (it != g_persist.end()) shadow_free(it->second.guest, it->second.va);
             gmalloc_set_tag(tag);
-            g = gmalloc((uint32_t)size + SHADOW_SLACK + SHADOW_CANARY);
+            g = gbigalloc((uint32_t)(size + SHADOW_SLACK + SHADOW_CANARY), &pva);
             gmalloc_set_tag(nullptr);
             if (!g) rt_fatal("out of guest memory for a %zu byte lock", size);
             memcpy(MEM + g, hostbits, size);
-            g_persist[{obj, sub}] = Persist{g, size, upload, tag};
+            g_persist[{obj, sub}] = Persist{g, size, upload, tag, pva};
         }
     } else {
         size_t need = size + SHADOW_SLACK + SHADOW_CANARY;
@@ -510,22 +513,23 @@ uint32_t shadow_begin(void *obj, uint32_t sub, void *hostbits, size_t size, DWOR
         if (cit != g_buf_shadow.end()) {
             if (cit->second.cap >= need) {
                 g = cit->second.guest; // cached buffer large enough: reuse
+                pva = cit->second.va;
             } else {
-                gfree(cit->second.guest); // too small: grow
+                shadow_free(cit->second.guest, cit->second.va); // too small: grow
                 g_buf_shadow.erase(cit);
             }
         }
         if (!g) {
             gmalloc_set_tag(tag);
-            g = gmalloc((uint32_t)need);
+            g = gbigalloc((uint32_t)need, &pva);
             gmalloc_set_tag(nullptr);
             if (!g) rt_fatal("out of guest memory for a %zu byte lock", size);
-            g_buf_shadow[{obj, sub}] = BufShadow{g, need};
+            g_buf_shadow[{obj, sub}] = BufShadow{g, need, pva};
         }
         if (!(flags & D3DLOCK_DISCARD)) memcpy(MEM + g, hostbits, size);
     }
     canary_fill(g, size);
-    g_shadows[{obj, sub}] = Shadow{g, hostbits, size, flags, persist, tag};
+    g_shadows[{obj, sub}] = Shadow{g, hostbits, size, flags, persist, tag, pva};
     return g;
 }
 
@@ -563,11 +567,11 @@ void shadow_flush(void *obj) {
 void shadow_forget(void *obj) {
     std::lock_guard<std::mutex> l(g_shadow_lock);
     for (auto it = g_persist.begin(); it != g_persist.end();) {
-        if (it->first.first == obj) { gfree(it->second.guest); it = g_persist.erase(it); }
+        if (it->first.first == obj) { shadow_free(it->second.guest, it->second.va); it = g_persist.erase(it); }
         else ++it;
     }
     for (auto it = g_buf_shadow.begin(); it != g_buf_shadow.end();) {
-        if (it->first.first == obj) { gfree(it->second.guest); it = g_buf_shadow.erase(it); }
+        if (it->first.first == obj) { shadow_free(it->second.guest, it->second.va); it = g_buf_shadow.erase(it); }
         else ++it;
     }
 }

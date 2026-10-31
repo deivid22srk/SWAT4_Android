@@ -5,13 +5,16 @@
  *   gcc -O1 -std=gnu11 -I <dir> -o /tmp/heap_test tools/heap_test.c -lpthread
  *
  * Exercita:
- *   1. smoke: alloc/read/write/free, alinhamento, gsize;
- *   2. reuso de bin (exact fit) e split;
- *   3. corrupt free-list link -> rebuild + relink, sem crash;
- *   4. gfree selvagem / double free / gsize lixo -> descartados;
- *   5. header corrompido detectado no gfree;
- *   6. chain quebrada -> quarentena, gmalloc segue vivo;
- *   7. martelada multi-thread (mutex, zero corrupcoes).
+ *   1. wrap+quarentena (cenario lahlog): walk nao enrola, quarentena tem fim,
+ *      aloc/liberta DEPOIS do rebuild funcionam de verdade;
+ *   2. gbigalloc: >=256 KiB vai para regiao VA, pequeno vai para o heap;
+ *   3. smoke: alloc/read/write/free, alinhamento, gsize;
+ *   4. reuso de bin (exact fit) e split;
+ *   5. corrupt free-list link -> rebuild + relink, sem crash;
+ *   6. gfree selvagem / double free / gsize lixo -> descartados;
+ *   7. header corrompido detectado no gfree;
+ *   8. chain quebrada -> quarentena, gmalloc segue vivo;
+ *   9. martelada multi-thread (mutex, zero corrupcoes).
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -119,6 +122,53 @@ static void test_chain_quarantine(void) {
     gfree(p); gfree(q);
 }
 
+/* lahlog: um overrun zerou boundary tags e a free walk ENROLOU (b+size passou
+ * de 2^32 e caiu abaixo da base). O build anterior colocou em quarentena
+ * [endereco-enrolado, g_top) — ou seja, o heap INTEIRO, incluindo todas as
+ * alocacoes futuras: todo gfree virou "dropped", o topo marchou ate 1 GiB e o
+ * jogo morreu com "out of guest memory for a 1579392 byte lock". O walk nao
+ * pode mais enrolar e a quarentena tem fim (poison_max = topo no rebuild):
+ * alocacoes feitas DEPOIS do rebuild sao normais e liberam de verdade. */
+static void test_wrap_quarantine(void) {
+    uint32_t a = gmalloc(0x100), b = gmalloc(0x100), c = gmalloc(0x100);
+    M32(b + 4) = 0xFFFFFFF1u; /* BSIZE=0xFFFFFFF0: b+sz enrola 32-bit */
+    M32(a + 8) = 0x21;        /* NEXTF insano -> dispara rebuild */
+    uint32_t p = gmalloc(0x1000);
+    CHECK(p != 0, "rebuild after size-wrap survives (p=%08x)", p);
+    uint32_t p2 = gmalloc(0x1000);
+    CHECK(p2 != 0, "bump alloc after rebuild (p2=%08x)", p2);
+    gfree(p2);
+    uint32_t p3 = gmalloc(0x1000);
+    CHECK(p3 == p2, "free AFTER rebuild is real, not quarantine-dropped (p3=%08x)", p3);
+    /* repetido: ciclo aloc/liberta continua estavel (nada vaza para o topo) */
+    for (int i = 0; i < 1000; i++) {
+        uint32_t t = gmalloc(0x400);
+        CHECK(t != 0, "post-quarantine churn alive (iter %d)", i);
+        gfree(t);
+        if (failures) break;
+    }
+    gfree(p);
+    gfree(a); gfree(c); /* em quarentena: descartados com log, sem crash */
+}
+
+static void test_gbigalloc(void) {
+    int va = 0;
+    uint32_t p = gbigalloc(1u << 20, &va); /* 1 MiB -> regiao VirtualAlloc */
+    CHECK(p != 0 && va == 1, "gbigalloc 1MiB backed by VA (p=%08x va=%d)", p, va);
+    CHECK(p >= GUEST_VA_BASE, "VA region lives above the heap (%08x)", p);
+    memset(MEM + p, 0xAB, 1u << 20);
+    CHECK(M8(p + 12345) == 0xAB, "VA region writable/readable");
+    gbigfree(p, va);
+    int va2 = 0;
+    uint32_t q = gbigalloc(1u << 20, &va2);
+    CHECK(q == p, "VA region recycled first-fit (%08x == %08x)", q, p);
+    gbigfree(q, va2);
+    int va3 = 0;
+    uint32_t s = gbigalloc(1024, &va3); /* < GUEST_BIG_MIN -> heap normal */
+    CHECK(va3 == 0 && s != 0 && s < GUEST_VA_BASE, "small gbigalloc goes to heap (va=%d s=%08x)", va3, s);
+    gbigfree(s, va3);
+}
+
 enum { MT_N = 20000, MT_SLOTS = 16 };
 static uint32_t mt_seed[2];
 
@@ -149,6 +199,10 @@ static void test_stress_mt(void) {
 int main(void) {
     mem_init();
     printf("== hardened guest heap test ==\n");
+    /* o teste do wrap precisa de um heap limpo: roda antes de qualquer
+     * corrupcao intencional dos outros cenarios */
+    test_wrap_quarantine();
+    test_gbigalloc();
     test_smoke();
     test_bins();
     test_link_corruption();

@@ -18,7 +18,7 @@ struct BcTex { D3DFORMAT fmt; };
 std::map<void *, BcTex> g_tex;                       // host texture -> real format
 struct BcSurf { void *tex; uint32_t sub; };
 std::map<void *, BcSurf> g_surf;                     // host level surface -> its texture level
-struct BcLevel { uint32_t guest; uint32_t pitch, rows; };
+struct BcLevel { uint32_t guest; uint32_t pitch, rows; int va; };
 std::map<std::pair<void *, uint32_t>, BcLevel> g_levels; // compressed copy per level
 struct BcLock { uint8_t *host; INT host_pitch; RECT r; };
 std::map<std::pair<void *, uint32_t>, BcLock> g_locks;
@@ -122,7 +122,7 @@ void bc_forget(void *obj) {
     std::lock_guard<std::mutex> l(g_bc_lock);
     if (g_tex.erase(obj)) {
         for (auto it = g_levels.begin(); it != g_levels.end();) {
-            if (it->first.first == obj) { gfree(it->second.guest); it = g_levels.erase(it); }
+            if (it->first.first == obj) { gbigfree(it->second.guest, it->second.va); it = g_levels.erase(it); }
             else ++it;
         }
         for (auto it = g_surf.begin(); it != g_surf.end();)
@@ -259,7 +259,7 @@ bool bc_lock(void *tex, uint32_t sub, uint32_t w, uint32_t h, const RECT *r, DWO
         BcLevel lv;
         lv.pitch = ((w + 3) / 4) * block_bytes(f);
         lv.rows = (h + 3) / 4;
-        lv.guest = gmalloc(lv.pitch * lv.rows + 16);
+        lv.guest = gbigalloc(lv.pitch * lv.rows + 16, &lv.va);
         if (!lv.guest) rt_fatal("out of guest memory for a BC level");
         memset(MEM + lv.guest, 0, lv.pitch * lv.rows);
         it = g_levels.emplace(key, lv).first;

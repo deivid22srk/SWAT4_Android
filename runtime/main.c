@@ -166,7 +166,8 @@ static int bink_test(CPU *c, const char *movie, const char *outdir) {
     if (!bink) { LOG("BinkOpen failed"); return 1; }
     uint32_t w = M32(bink), h = M32(bink + 4), frames = M32(bink + 8);
     LOG("bink: %ux%u, %u frames", w, h, frames);
-    uint32_t buf = gmalloc(w * h * 4);
+    int buf_va = 0;
+    uint32_t buf = gbigalloc(w * h * 4, &buf_va); /* guest-written by binkw32 */
     for (uint32_t f = 1; f <= frames && f <= 90; f++) {
         uint32_t a1[1] = {bink};
         rt_invoke(c, rt_import("binkw32.dll", "_BinkDoFrame@4"), 1, a1);
@@ -625,7 +626,8 @@ extern void platform_init(void);
      * cannot walk the protected null page (boot crash at guest 0x1190). */
     extern void swat4_gmalloc_guard_install(void);
     swat4_gmalloc_guard_install();
-    LOG("heap: hardened allocator active (link validation + canaries + rebuild-on-corruption)");
+    LOG("heap: hardened allocator active (link validation + canaries + rebuild-on-corruption "
+        "+ bounded quarantine; game-writable buffers >=256 KiB on VirtualAlloc regions)");
     /* Static import closure of Swat4.exe (verified with pefile): its own game
      * DLL imports plus their transitive game-DLL dependencies. Everything
      * else is initialised on demand by LoadLibrary. */

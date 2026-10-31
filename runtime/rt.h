@@ -67,6 +67,11 @@ uint32_t grealloc(uint32_t p, uint32_t size);
 uint32_t gsize(uint32_t p);
 uint32_t gvalloc(uint32_t addr, uint32_t size);
 void gvfree(uint32_t addr);
+/* Game-writable buffers (lock shadows, sound data, BC levels): >=256 KiB is
+ * backed by a VirtualAlloc region so stray writes cannot corrupt the heap.
+ * *va records the backing; release with gbigfree. */
+uint32_t gbigalloc(uint32_t n, int *va);
+void gbigfree(uint32_t p, int va);
 /* Best-effort label for the next gmalloc on this thread; shows up in the
  * heap event ring when corruption is diagnosed ("idx-lock", "vtx-lock", ...). */
 void gmalloc_set_tag(const char *tag);

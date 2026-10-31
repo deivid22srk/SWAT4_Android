@@ -16,6 +16,18 @@
  *     memory after the break point (live blocks there keep working, we just
  *     never hand that memory out again);
  *   - drops (and logs) frees of pointers that are not valid heap blocks.
+ *
+ * lahlog follow-up: the first quarantine build used QUARANTINED(p) =
+ * p >= poison_min. The rebuild walk had wrapped (a smashed size field sent it
+ * below the heap base), so poison_min was under the heap and EVERY block -
+ * including all future bump allocations - counted as quarantined; every free
+ * was dropped and the heap walked off the end ("out of guest memory for a
+ * 1579392 byte lock" ~120k log lines later). Quarantine is now the closed
+ * range [poison_min, poison_max) (poison_max = heap top at rebuild time) and
+ * the walk can no longer wrap. Large game-writable buffers (lock shadows,
+ * sound data, BC levels) moved out of this heap entirely: they are backed by
+ * VirtualAlloc regions (gbigalloc), whose bookkeeping lives on the host, so a
+ * stray write past their end cannot reach allocator metadata at all.
  */
 #include "rt.h"
 #include <string.h>
@@ -41,6 +53,7 @@ static HeapEv g_ring[HEAP_RING];
 static uint32_t g_ring_i;
 static __thread const char *t_tag;
 static uint32_t g_poison_min = 0xFFFFFFFFu; /* first quarantined byte (guest addr) */
+static uint32_t g_poison_max;               /* heap top at the last rebuild */
 static uint32_t g_corrupt_events;
 
 void gmalloc_set_tag(const char *tag) { t_tag = tag; }
@@ -90,7 +103,7 @@ static int block_sane(uint32_t b) {
     if ((b & 15) != 8) return 0;
     uint32_t sz = BSIZE(b);
     if (sz < MINBLK || (sz & 15)) return 0;
-    if (b + sz > g_top) return 0;
+    if ((uint64_t)b + sz > g_top) return 0; /* 64-bit: a smashed size must wrap-detect, not wrap-pass */
     return 1;
 }
 
@@ -100,20 +113,26 @@ static int link_sane(uint32_t p) {
 }
 
 /* Rebuild the segregated free lists by walking the boundary-tag chain.
- * Everything at/after the first insane header is quarantined: never relinked,
- * never handed out again, but left untouched so live allocations there keep
- * working. */
+ * Everything from the first bad header up to the current heap top is
+ * quarantined: never relinked, never handed out again, but left untouched so
+ * live allocations there keep working. Blocks allocated after the rebuild
+ * (at/above poison_max) are ordinary and free normally. */
 static void heap_rebuild(void) {
     memset(g_bins, 0, sizeof g_bins);
     g_last_block = 0;
     uint32_t b = GUEST_HEAP_BASE + 8;
     int freed = 0;
     while (b < g_top) {
-        if (!block_sane(b)) {
+        uint32_t sz;
+        /* 64-bit step check: a smashed size field used to wrap b below the
+         * heap base, which quarantined the whole heap including every future
+         * allocation. */
+        if (!block_sane(b) || (sz = BSIZE(b), (uint64_t)b + sz > g_top)) {
             if (g_poison_min == 0xFFFFFFFFu || b < g_poison_min) g_poison_min = b;
+            if (g_top > g_poison_max) g_poison_max = g_top;
             LOG("heap: block chain broken at %08x (hdr %08x %08x links %08x %08x); "
                 "memory [%08x..%08x) quarantined (leaked but still usable)",
-                b, M32(b), M32(b + 4), M32(b + 8), M32(b + 12), b, g_top);
+                b, M32(b), M32(b + 4), M32(b + 8), M32(b + 12), g_poison_min, g_poison_max);
             for (uint32_t a = (b > GUEST_HEAP_BASE + 32 ? b - 32 : GUEST_HEAP_BASE);
                  a + 16 <= g_top && a < b + 48; a += 16)
                 LOG("heap:   %08x: %08x %08x %08x %08x", a, M32(a), M32(a + 4), M32(a + 8), M32(a + 12));
@@ -122,10 +141,14 @@ static void heap_rebuild(void) {
         if (!BUSED(b)) { link_free(b); freed++; }
         b += BSIZE(b);
     }
-    LOG("heap: free lists rebuilt from boundary tags, %d free blocks relinked", freed);
+    LOG("heap: free lists rebuilt from boundary tags, %d free blocks relinked "
+        "(quarantine %08x..%08x, top now %08x)", freed, g_poison_min, g_poison_max, g_top);
 }
 
-#define QUARANTINED(p) (g_poison_min != 0xFFFFFFFFu && (p) >= g_poison_min)
+/* Blocks inside the closed quarantine range stay alive for the game but are
+ * never handed out again; frees of them are dropped. Blocks above poison_max
+ * (allocated after the rebuild) are NOT quarantined. */
+#define QUARANTINED(p) (g_poison_max != 0 && (p) >= g_poison_min && (p) < g_poison_max)
 
 static void unlink_free(uint32_t b) {
     uint32_t n = NEXTF(b), p = PREVF(b);
@@ -254,8 +277,9 @@ void gfree(uint32_t p) {
         }
     }
     ring_note(p, sz, 1);
-    if (b + sz == g_top) {
-        /* give the tail back to the bump region */
+    if (b + sz == g_top && !QUARANTINED(b)) {
+        /* give the tail back to the bump region; never shrink into or below
+         * the quarantine, whose live blocks must stay untouched */
         g_top = b;
         g_last_block = 0;
         if (b > GUEST_HEAP_BASE + 8 && BPREV(b)) g_last_block = b - BPREV(b);
@@ -346,4 +370,29 @@ void gvfree(uint32_t addr) {
             break;
         }
     pthread_mutex_unlock(&g_va_lock);
+}
+
+/* ---- big game-writable buffers ----
+ * D3D lock shadows, DirectSound data and BC levels are handed to the game as
+ * raw pointers it writes with unknown discipline. Back anything reasonably
+ * large with a VirtualAlloc region: the region list lives on the host, so a
+ * write past the buffer end (observed: 49+ zero bytes past a 1.5 MiB tex-rect
+ * shadow, lahlog) lands in zero pages, never in heap metadata. The 64 KiB
+ * region rounding doubles as free overrun slack. Callers remember the va flag
+ * and release with gbigfree. */
+#define GUEST_BIG_MIN (256u * 1024u)
+uint32_t gbigalloc(uint32_t n, int *va) {
+    if (n >= GUEST_BIG_MIN) {
+        uint32_t p = gvalloc(0, n);
+        if (p) { if (va) *va = 1; return p; }
+        LOG("gbigalloc: VA space exhausted for %u bytes, falling back to the heap", n);
+    }
+    if (va) *va = 0;
+    return gmalloc(n);
+}
+
+void gbigfree(uint32_t p, int va) {
+    if (!p) return;
+    if (va) gvfree(p);
+    else gfree(p);
 }

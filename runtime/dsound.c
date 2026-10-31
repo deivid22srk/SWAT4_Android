@@ -10,6 +10,7 @@
 typedef struct {
     uint32_t data;      /* guest address */
     uint32_t size;      /* bytes */
+    int va;             /* data is a VirtualAlloc region (gbigalloc) */
     int refs;           /* shared between duplicates */
 } DSData;
 
@@ -109,7 +110,7 @@ static void buf_destroy(DSBuf *b) {
         if (g_bufs[k] == b) g_bufs[k] = NULL;
     SDL_UnlockMutex(g_mix_lock);
     if (--b->d->refs == 0) {
-        if (b->d->data) gfree(b->d->data);
+        if (b->d->data) gbigfree(b->d->data, b->d->va);
         free(b->d);
     }
     free(b);
@@ -263,7 +264,7 @@ SHIM(ds_CreateSoundBuffer) {
     if (wfx) { b->channels = M16(wfx + 2); b->rate = (int)M32(wfx + 4); b->bits = M16(wfx + 14); }
     if (!b->primary) {
         b->d->size = M32(desc + 8);
-        b->d->data = gmalloc(b->d->size ? b->d->size : 16);
+        b->d->data = gbigalloc(b->d->size ? b->d->size : 16, &b->d->va);
         memset(MEM + b->d->data, b->bits == 8 ? 0x80 : 0, b->d->size);
     }
     TRACE("dsound: buffer %u bytes %dch %dHz %dbit flags %x", b->d->size, b->channels, b->rate, b->bits, b->flags);

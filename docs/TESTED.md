@@ -799,3 +799,74 @@ Vetores prováveis (o heap guest serve a tudo):
   `GUEST OVERRUN` dizendo tag/objeto/tamanho — ou seja, o próximo log
   **nomeia o culpado** em vez de dar SIGSEGV seco no `gmalloc`.
 * `heap: hardened allocator active` no boot confirma a build nova.
+
+## 2026-10-31 — lahlog: "out of guest memory for a 1579392 byte lock"
+
+### Leitura do log (653 MB, 17,88 M linhas — o jogo chegou MUITO mais longe)
+
+Cadeia completa, em ordem:
+
+1. `d3d9: GUEST OVERRUN #1 (unlock): tag=tex-rect obj=… guest=20ee3c40
+   size=1579392 wrote at least 17 bytes past the locked region (canary +0=00)`
+   — o vídeo Bink do loading escreveu **além do fim** do shadow de lock de
+   1,5 MB; como o overrun passou das 48 bytes de folga+canário, alcançou os
+   boundary tags do bloco seguinte (header `00000000 00000000`).
+2. `heap: CORRUPTION #1: next-block header on free (a=210655f8 b=20ee3c38)`
+   e `#2/#3: free-list entry … c=00616880` — links das free lists com lixo.
+3. `heap: block chain broken at 1d5fb228 … memory [1d5fb228..216b65a8)
+   quarantined` — **bug do fix anterior**: um tamanho estragado (0xFFFFFFF0)
+   fez a walk do rebuild **rolar 32 bits** (b+size → abaixo da base do heap!),
+   então a quarentena começou num endereço **fora do heap** e, como
+   `QUARANTINED(p) = p >= g_poison_min`, **todo o heap** — incluindo TODA
+   alocação futura — ficou "em quarentena".
+4. 1.302× `heap: free of quarantined block … dropped` — todo `gfree` virou
+   no-op; o topo (`g_top`) marchou de 549 MB até 1 GB em ~120 mil linhas.
+5. `guest heap exhausted (1579440 bytes requested)` →
+   `FATAL: out of guest memory for a 1579392 byte lock` — o lock do próximo
+   frame do vídeo não achou memória. **Não era falta de memória: era o
+   descarte de frees.**
+
+### Correções (runtime/, um commit)
+
+* **`runtime/heap.c`**:
+  * quarentena agora é a faixa fechada `[g_poison_min, g_poison_max)` com
+    `g_poison_max = g_top` no momento do rebuild — alocações feitas **depois**
+    do rebuild são blocos normais e libertam de verdade;
+  * a walk do rebuild usa aritmética 64-bit no passo (`b + sz > g_top` em
+    `uint64_t`) e `block_sane` idem — tamanho estragado agora é detectado
+    **no bloco em que está**, não depois de rolar para fora do heap;
+  * `gfree` não devolve a cauda ao bump se o bloco cair na quarentena;
+  * novo `gbigalloc(n,&va)`/`gbigfree(p,va)`: buffers **escritos pelo jogo**
+    com ≥256 KiB vão para regiões de `VirtualAlloc` ([0x40000000,0x60000000),
+    livro-razão no host): overrun/stale write cai em página zero, **nunca em
+    metadados de alocador**; o arredondamento de 64 KiB da região serve de
+    folga extra; se a região esgotar, cai para o heap (com canário).
+* **`runtime/d3d9_bridge.cpp`**: `Shadow`/`Persist`/`BufShadow` guardam a
+  bandeira `va`; todos os frees de shadow passam por `gbigfree`
+  (`shadow_forget` no Release incluído).
+* **`runtime/d3d9_bcemu.cpp`**: níveis BC (cópias DXT) idem via `BcLevel.va`.
+* **`runtime/dsound.c`**: `DSData.va` — dados de buffers de som grandes idem
+  (o `Lock` entrega ponteiro direto do dado ao jogo).
+* **`runtime/main.c`**: preload do Bink usa `gbigalloc` (o código Bink
+  emulado escreve nesse buffer — o mesmo código do overrun).
+
+### Validação local
+
+* `sh tools/test_heap.sh` — **ALL PASS**, agora com 2 cenários novos:
+  * `test_wrap_quarantine` (exatamente o lahlog): tamanho 0xFFFFFFF1 no
+    header + link insano → rebuild **sem enrolar**, quarentena com fim,
+    `gfree` pós-rebuild liberta de verdade (`p3 == p2`), e 1.000 iterações
+    de churn aloc/liberta estáveis (nada vaza para o topo);
+  * `test_gbigalloc`: 1 MiB → região VA (reciclada first-fit), 1 KiB → heap.
+* `gcc/g++ -fsyntax-only` sobre `heap.c`, `dsound.c`, `main.c`,
+  `d3d9_bridge.cpp`, `d3d9_bcemu.cpp`: **rc=0**.
+
+### O que esperar no próximo log
+
+* O overrun do Bink (canário) **pode ainda ocorrer**, mas cai na folga da
+  região VA: sem `CORRUPTION`, sem quarentena, sem exaustão — só o log
+  `GUEST OVERRUN … tag=tex-rect` continua (informativo);
+* Se houver corrupção de heap de novo: quarentena **limitada** ao intervalo
+  `[min, topo-no-rebuild)`, o jogo continua e o heap segue utilizável;
+* Boot mostra a linha nova `… bounded quarantine; game-writable buffers
+  >=256 KiB on VirtualAlloc regions`.
