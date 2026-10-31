@@ -39,8 +39,17 @@
  * directly); every dynamic pointer is checked against HEAP_*. */
 #define MOD_LO             0x01000000u
 #define MOD_HI             0x03E00000u
+/* Dynamic guest VA: heap 0x20000000-0x40000000 PLUS the VirtualAlloc pool
+ * 0x40000000-0x60000000 (docs/RECON.md §3). UE2 serves UObject memory from
+ * FMallocBinned, which pools via VirtualAlloc: on device every UClass /
+ * pawn / door / GObjObjects payload lives in the SECOND band (field log:
+ * UViewport 0x45E73200, VirtualAlloc pools 0x477e0000/0x47a60000). Accepting
+ * only the first band made scan() bail to HUD_CTX_UNKNOWN forever on the
+ * phone (log: "hud: ... ctx 0" at the main menu): the overlay never saw the
+ * menu, everMenu never latched in Java and every free tap degraded to the
+ * movie-skip ESC instead of the menu mouse — the dead HUD of field video. */
 #define HEAP_LO            0x20000000u
-#define HEAP_HI            0x40000000u
+#define HEAP_HI            0x60000000u
 #define GOBJ_NUM_CAP       200000u  /* far above any real object count */
 /* FName table: Core.dll RVA 0x28c2c0 (guest 0x0128C2C0, docs/HUD_PLAN.md §1)
  * holds FNameEntry** Names. Entries are heap pointers; the index is masked
