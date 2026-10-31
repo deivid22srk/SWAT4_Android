@@ -29,7 +29,7 @@ g++ $CX -c runtime/d3d9_bridge.cpp -o /tmp/chk_b.o
 
 echo "== selftest build (vinput.o from gcc above = the real C ABI)"
 g++ -DGAME_SWAT4 -DTOUCH_SELFTEST -std=c++17 -O0 -g -Iruntime -I/tmp/sdlinc \
-    runtime/touch_swat4.cpp /tmp/chk_v.o $(gcc $CF -c "$STUBS" -o /tmp/chk_stub.o && echo /tmp/chk_stub.o) \
+    runtime/touch_swat4.cpp runtime/hud_state.cpp /tmp/chk_v.o $(gcc $CF -c "$STUBS" -o /tmp/chk_stub.o && echo /tmp/chk_stub.o) \
     -o /tmp/touchtest
 echo "== selftest run (script sha256 $(sha256sum "$0" | cut -c1-16))"
 /tmp/touchtest

@@ -901,3 +901,70 @@ Correções (commit "d3d9: one host device..."):
   casando com o que o caminho SetRes da UE2 espera.
 * `dispatch.c`: teto de ~96 MB por run no trace de API (o log=2 chegou a
   609 MB num único run; LOG() normal continua fluindo, só o trace cala).
+
+## 2026-10-31 — HUD contextual, etapa 2: consciência de missão (estado real do jogo)
+
+### Fundação medida no jogo real (reanálise da cópia GOG `94d1a40f…`)
+
+* Exports extraídos com `pefile` (Core 2.675, Engine 7.497, SwatGame 1.505
+  nomes) → `game_src/exports.json` (fora do repo). Âncoras usadas pelo HUD:
+  `UObject::GObjObjects` = Core RVA `0x294354` (guest `0x01294354`),
+  `ASwatPlayer::PrivateStaticClass` = SwatGame RVA `0xab848` (guest
+  `0x032AB848`).
+* Layout pinado por desassembly (capstone) do código real:
+  `UObject::Class` em `+0x24` (`IsA`), `UObject::Name.Index` em `+0x20`
+  (`HashObject`/`GetFullName`), `AActor::Location` em `+0x174`
+  (`AActor::GetAimLocation` e `ASwatDoor::GetBreachAimLocation` usam o
+  mesmo offset). `UClass` vive no heap guest (o valor do slot de
+  `PrivateStaticClass` é ponteiro de heap), validado no código.
+* Binds reais confirmados em `DefUser.ini` (F=IssueComplianceOrInteract,
+  G=Grab, 1-0/F1-F10=CommandOrEquip, Espaço=GiveDefaultCommand,
+  Botão direito=OpenGraphicCommandInterface, X=NextFireMode, Z=ToggleZoom,
+  R=Reload, V=ToggleFlashlight). Motor de contexto do jogo mapeado em
+  `PlayerInterface_Use.ini`/`PlayerInterface_Command_SP.ini` (trace de foco,
+  Range=2000, portas Range=128). Tudo documentado em `docs/HUD_PLAN.md`.
+
+### O que a etapa 2 entrega (código no runtime)
+
+* **`runtime/hud_state.cpp/.h`** — leitor de estado real, sem SDL/D3D, sem
+  alocação: caminha `GObjObjects`, casa `obj->Class` com a UClass de
+  `ASwatPlayer` (comparação direta, sem nome), cacheia o pawn e a Location.
+  Contexto: `UNKNOWN` (memória inválida: comportamento antigo), `MENU`
+  (engine viva, sem pawn: menu/loading/debriefing), `MISSION` (pawn real).
+  Escaneamento throttled (1 s), morte do pawn detectada em 1 tick (1 leitura),
+  todos os ponteiros dinâmicos validados na faixa do heap guest
+  (`[0x20000000,0x40000000)`) e contagem de objetos com teto (200 mil).
+* **`touch_swat4.cpp`** — `MENU` ⇒ HUD some (fade suave, nenhum quad
+  desenhado no fim) **e para de capturar toques** (o menu do jogo recebe
+  tudo); transição para oculto solta todas as teclas/botões/stick pendentes
+  (`ts_release_all`) para nada ficar latchado; `MISSION` ⇒ HUD volta.
+  `hud.ini` ganha `always_show=1` (comportamento legado, escape honesto).
+  Logs novos de campo: `overlay: mission context acquired (pawn=…)` e
+  `overlay: mission context -> menu (hud hidden)`.
+
+### Validação local
+
+* `sh scripts/test_touch.sh` — **SELFTEST OK (0 falhas)**, agora com a seção
+  14: imagem guest sintética de 4 GiB via `MAP_NORESERVE` cobrindo
+  S1 (sem memória → UNKNOWN, HUD ativo), S2 (core não inicializado →
+  UNKNOWN), S3 (engine viva sem pawn → MENU oculto, toque no FOGO não
+  sintetiza nada nem consome o dedo), S4 (pawn aparece → MISSION em um
+  tick; pawn e Location lidos de verdade), S5 (throttle: mudança dentro da
+  janela não é vista; fora dela, rescan vê), S6 (objeto morto → MENU em um
+  tick), S7 (virada para MENU durante FOGO pressionado solta o hold, toques
+  passam direto, zero churn de teclado). **Este teste apanhou e corrigiu um
+  defeito real do primeiro rascunho: a validação de cache confiava no objeto
+  vivo mesmo removido do array (nunca voltaria ao menu); o array é a
+  verdade, o cache é só caminho rápido.**
+* Mesma suíte sob `-fsanitize=address,undefined`: **0 falhas, 0 vazamentos**.
+* `g++` com os flags reais de build (DXVK native, C++17): `hud_state.cpp` e
+  `touch_swat4.cpp` compilam limpos; contrato de símbolos verificado
+  (`hud_*` C, `vinput_*` C puro).
+
+### O que esperar no próximo log (aparelho)
+
+* Boot: `overlay: hud.ini …` como antes; ao entrar no menu principal deve
+  aparecer `overlay: mission context -> menu (hud hidden)` (o HUD deixa de
+  flutuar sobre o menu e de injetar toques nele);
+* Ao iniciar uma missão: `overlay: mission context acquired (pawn=xxxxxxxx)`;
+* Ao voltar ao debriefing: `… -> menu` de novo, sem tecla presa.

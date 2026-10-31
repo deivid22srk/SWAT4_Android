@@ -24,6 +24,7 @@
 #include <math.h>
 
 #include "vinput.h"
+#include "hud_state.h"
 
 #ifdef TOUCH_SELFTEST
 #define OLOG(...) do {} while (0)
@@ -80,6 +81,7 @@ typedef struct {
     int labels;         /* draw text labels */
     int hold_crouch;    /* 1 = AGACH holds C down, 0 = 120 ms tap (game toggle) */
     int hold_zoom;      /* 1 = ZOOM holds Z down, 0 = 120 ms tap (game toggle) */
+    int always_show;    /* 1 = legacy behaviour: never hide on menu/loading */
 } HudCfg;
 
 /* Screen insets (notch/taskbar), pixels. */
@@ -112,6 +114,7 @@ typedef struct {
     Pend pend[TOUCH_MAXPEND]; int npend;
     float alpha[B_MAXID];            /* eased per-button opacity */
     float fade;                      /* whole-overlay ease-in */
+    int ctx_hidden;                  /* 1 = menu/loading: draw nothing, pass touches through */
 } TouchState;
 
 /* Buttons are released by id, not by index: the layout can be rebuilt
@@ -244,6 +247,7 @@ static void hud_cfg_clamp(HudCfg *c) {
     c->labels = c->labels ? 1 : 0;
     c->hold_crouch = c->hold_crouch ? 1 : 0;
     c->hold_zoom = c->hold_zoom ? 1 : 0;
+    c->always_show = c->always_show ? 1 : 0;
 }
 
 /* Tiny parser for <g_save_dir>/hud.ini: lines "key=value", '#' comments. */
@@ -271,6 +275,7 @@ static int hud_cfg_load(HudCfg *c, const char *path) {
         else if (!strcmp(key, "labels")) c->labels = (int)strtol(val, NULL, 10);
         else if (!strcmp(key, "hold_crouch")) c->hold_crouch = (int)strtol(val, NULL, 10);
         else if (!strcmp(key, "hold_zoom")) c->hold_zoom = (int)strtol(val, NULL, 10);
+        else if (!strcmp(key, "always_show")) c->always_show = (int)strtol(val, NULL, 10);
     }
     fclose(f);
     hud_cfg_clamp(c);
@@ -287,10 +292,13 @@ static void hud_cfg_save(const char *path, const HudCfg *c) {
                "# look_invert_y / handed / labels / hold_crouch / hold_zoom: 0 or 1\n"
                "# AGACH (C) and ZOOM (Z) are 120 ms taps by default (the game's own\n"
                "# crouch/zoom modes toggle); set hold_crouch/hold_zoom=1 to hold the key.\n"
+               "# always_show=1 keeps the HUD visible over menus/loading (legacy).\n"
                "scale=%g\nopacity=%g\nlook_sens=%g\nlook_invert_y=%d\n"
-               "handed=%d\nlabels=%d\nstick_radius=%g\nhold_crouch=%d\nhold_zoom=%d\n",
+               "handed=%d\nlabels=%d\nstick_radius=%g\nhold_crouch=%d\nhold_zoom=%d\n"
+               "always_show=%d\n",
             (double)c->scale, (double)c->opacity, (double)c->look_sens, c->look_invert_y,
-            c->handed, c->labels, (double)c->stick_radius, c->hold_crouch, c->hold_zoom);
+            c->handed, c->labels, (double)c->stick_radius, c->hold_crouch, c->hold_zoom,
+            c->always_show);
     fclose(f);
 }
 
@@ -643,6 +651,8 @@ static int looker_count(const TouchState *ts) {
 }
 
 static void ts_down(TouchState *ts, long fid, float x, float y, int w, int h, uint32_t now) {
+    /* Menu/loading: the game UI gets every touch; nothing is consumed. */
+    if (ts->ctx_hidden) return;
     ts_ensure_layout(ts, w, h, &ts->safe);
     Finger *fr = NULL;
     for (int i = 0; i < TOUCH_MAXF && !fr; i++)
@@ -787,7 +797,18 @@ static void ts_release_all(TouchState *ts, uint32_t now) {
     (void)now;
 }
 
-/* Load (or create with defaults) hud.ini. Returns the values via ts->cfg. */
+/* Context flip (menu <-> mission). Entering a hidden state releases every
+ * held key/mouse/stick so nothing can stay latched into the game while the
+ * overlay is blind; leaving it just re-enables drawing and consumption.
+ * Every flip is logged: transitions are rare and they name the field state. */
+static void ts_set_context(TouchState *ts, int hidden, uint32_t now) {
+    if (hidden == ts->ctx_hidden) return;
+    ts->ctx_hidden = hidden;
+    OLOG("overlay: hud %s", hidden ? "hidden (menu/loading)" : "shown (mission)");
+    if (hidden) ts_release_all(ts, now);
+    (void)now;
+}
+
 static void ts_init(TouchState *ts, const char *ini_path) {
     memset(ts, 0, sizeof *ts);
     hud_cfg_defaults(&ts->cfg);
@@ -817,6 +838,8 @@ extern int g_wm_n;
 extern uint32_t g_wm_vk[], g_wm_sc[];
 extern int g_wm_down[];
 }
+
+#include <sys/mman.h> /* stage-2 tests: synthetic 4 GiB guest image */
 
 static const Btn *tbtn(TouchState *ts, int id) {
     for (int i = 0; i < ts->nbtn; i++)
@@ -1411,6 +1434,122 @@ int main(void) {
         }
     }
 
+    /* --- 14. stage 2: mission context from a synthetic guest image ---
+     * hud_state reads the engine's own object array; the selftest builds a
+     * fake one with MAP_NORESERVE so the whole 4 GiB flat space is addressable
+     * without actually committing memory. */
+    {
+        enum { GOBJ_ADDR = 0x01294354, CLS_ADDR = 0x032AB848 };
+        const uint32_t CLS = 0x2AAA1000;   /* heap: UClass object */
+        const uint32_t PAWN = 0x2BBB2000;  /* heap: ASwatPlayer object */
+        const uint32_t DATA = 0x2CCC3000;  /* heap: the TArray payload */
+        hud_state_reset_for_tests();
+        hud_set_scan_interval(50);
+
+        void *img = mmap(NULL, 0x40000000u, PROT_READ | PROT_WRITE,
+                         MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+        CHECK(img != MAP_FAILED);
+        uint8_t *m = (uint8_t *)img;
+        if (img != MAP_FAILED) {
+            auto w32 = [&](uint32_t a, uint32_t v) {
+                memcpy(m + a, &v, 4);
+            };
+            TouchState ts;
+            ts_init(&ts, "/tmp/ts_ctx.ini");
+            Safe ss;
+            hud_safe_defaults(&ss, W, H);
+            ts_ensure_layout(&ts, W, H, &ss); /* the layout ts_init does not build */
+
+            /* S1: no guest memory at all -> UNKNOWN, HUD stays active */
+            hud_game_tick(1000);
+            CHECK(hud_game_ctx() == HUD_CTX_UNKNOWN);
+            ts_set_context(&ts, 0, 1000);
+            CHECK(!ts.ctx_hidden);
+            const Btn *f = tbtn(&ts, B_FOGO);
+            CHECK(f != NULL);
+            int mx, my;
+            vinput_mouse_take(&mx, &my);
+            ts_down(&ts, 4100, f->x + f->w / 2, f->y + f->h / 2, W, H, 1000);
+            CHECK((vinput_mouse_buttons() & 1u) != 0); /* visible: tap works */
+            ts_up(&ts, 4100);
+
+            /* S2: guest memory present but core not initialized -> UNKNOWN */
+            hud_set_guest_mem(m);
+            hud_game_tick(1100);
+            CHECK(hud_game_ctx() == HUD_CTX_UNKNOWN);
+
+            /* S3: engine live, no pawn -> MENU, HUD hidden and pass-through */
+            w32(CLS_ADDR, CLS);
+            w32(GOBJ_ADDR, DATA);          /* TArray.Data */
+            w32(GOBJ_ADDR + 4, 3);         /* TArray.Num */
+            w32(GOBJ_ADDR + 8, 8);         /* TArray.Max */
+            w32(DATA + 0, 0x2DDD4000);
+            w32(DATA + 4, 0x2EEE5000);
+            w32(DATA + 8, 0x2FFF6000);
+            hud_game_tick(1200);
+            CHECK(hud_game_ctx() == HUD_CTX_MENU);
+            ts_set_context(&ts, 1, 1200);
+            CHECK(ts.ctx_hidden);
+            vinput_mouse_take(&mx, &my);
+            ts_down(&ts, 4101, f->x + f->w / 2, f->y + f->h / 2, W, H, 1200);
+            CHECK((vinput_mouse_buttons() & 1u) == 0); /* menu: nothing fires */
+            CHECK(finger_find(&ts, 4101) == NULL);     /* not even consumed */
+
+            /* S4: the pawn appears -> MISSION within one tick (throttle beat:
+             * the scan ran at 1200, this is 1300 > 1200+50) */
+            w32(DATA + 8, PAWN);
+            w32(PAWN + 0x24, CLS);         /* obj->Class == ASwatPlayer class */
+            w32(PAWN + 0x174, 0x42A00000); /* Location.X = 80.0f */
+            w32(PAWN + 0x178, 0x42C80000); /* Location.Y = 100.0f */
+            w32(PAWN + 0x17C, 0x42700000); /* Location.Z = 60.0f */
+            hud_game_tick(1300);
+            CHECK(hud_game_ctx() == HUD_CTX_MISSION);
+            CHECK(hud_pawn() == PAWN);
+            const uint32_t *loc = hud_pawn_loc();
+            CHECK(loc && loc[0] == 0x42A00000u && loc[2] == 0x42700000u);
+            ts_set_context(&ts, 0, 1300);
+            CHECK(!ts.ctx_hidden);
+            vinput_mouse_take(&mx, &my);
+            ts_down(&ts, 4102, f->x + f->w / 2, f->y + f->h / 2, W, H, 1300);
+            CHECK((vinput_mouse_buttons() & 1u) != 0); /* mission: tap works */
+
+            /* S5: throttle — memory changed mid-interval is NOT seen yet */
+            w32(DATA + 8, 0x2FFF6000);     /* pawn removed from the array */
+            hud_game_tick(1310);           /* within the 50 ms window */
+            CHECK(hud_game_ctx() == HUD_CTX_MISSION); /* cache still trusted */
+            hud_game_tick(1400);           /* past the window */
+            CHECK(hud_game_ctx() == HUD_CTX_MENU);    /* rescan saw no pawn */
+
+            /* S6: stale cache is invalidated within one tick (mission end) */
+            w32(DATA + 8, PAWN);
+            hud_game_tick(1500);
+            CHECK(hud_game_ctx() == HUD_CTX_MISSION);
+            w32(PAWN + 0x24, 0);           /* object dies: Class nulled */
+            hud_game_tick(1501);           /* validation runs every tick */
+            CHECK(hud_game_ctx() == HUD_CTX_MENU);
+
+            /* S7: flip to hidden releases held keys exactly once */
+            w32(PAWN + 0x24, CLS);
+            hud_game_tick(1600);
+            CHECK(hud_game_ctx() == HUD_CTX_MISSION);
+            ts_set_context(&ts, 0, 1600);
+            vinput_mouse_take(&mx, &my);
+            uint32_t e0 = vinput_key_edges();
+            ts_down(&ts, 4103, f->x + f->w / 2, f->y + f->h / 2, W, H, 1600);
+            CHECK((vinput_mouse_buttons() & 1u) != 0);
+            ts_set_context(&ts, 1, 1650);  /* menu while holding FOGO */
+            CHECK((vinput_mouse_buttons() & 1u) == 0); /* hold released */
+            CHECK(finger_find(&ts, 4103) == NULL);
+            ts_down(&ts, 4104, f->x + f->w / 2, f->y + f->h / 2, W, H, 1650);
+            CHECK((vinput_mouse_buttons() & 1u) == 0); /* blind: pass-through */
+            ts_set_context(&ts, 0, 1700);
+            CHECK((vinput_mouse_buttons() & 1u) == 0); /* not re-pressed */
+            CHECK(vinput_key_edges() == e0);           /* no key churn */
+            munmap(img, 0x40000000u);
+        }
+        hud_state_reset_for_tests();
+    }
+
     printf(g_fail ? "\nSELFTEST FAILED (%d)\n" : "\nSELFTEST OK (%d failures)\n", g_fail);
     return g_fail ? 1 : 0;
 }
@@ -1564,8 +1703,9 @@ static int btn_pressed(const TouchState *ts, int id) {
 
 static void build_frame(TouchState *ts) {
     g_nv = 0;
-    ts->fade = ease_to(ts->fade, 1.0f, 16.7f); /* one Present ~= one frame */
+    ts->fade = ease_to(ts->fade, ts->ctx_hidden ? 0.0f : 1.0f, 16.7f);
     float fade = ts->fade;
+    if (fade < 0.01f) return; /* hidden by context: nothing to build */
 
     for (int i = 0; i < ts->nbtn; i++) {
         const Btn *b = &ts->btns[i];
@@ -1757,6 +1897,7 @@ extern "C" void touch_setup_guest(void) {
     char path[1100];
     snprintf(path, sizeof path, "%s/hud.ini", g_save_dir);
     ts_init(&g_ts, path);
+    hud_set_guest_mem(MEM); /* real game memory (4 GiB flat region, x86.h) */
     OLOG("overlay: hud.ini scale=%g opacity=%g sens=%g invert=%d handed=%d labels=%d stick_r=%g",
          (double)g_ts.cfg.scale, (double)g_ts.cfg.opacity, (double)g_ts.cfg.look_sens,
          g_ts.cfg.look_invert_y, g_ts.cfg.handed, g_ts.cfg.labels, (double)g_ts.cfg.stick_radius);
@@ -1832,9 +1973,20 @@ extern "C" void touch_draw(void *dev) {
     overlay_safe(&s, w, h);
     ts_ensure_layout(&g_ts, w, h, &s);
 
-    ts_tick(&g_ts, SDL_GetTicks());
+    uint32_t now = SDL_GetTicks();
+    hud_set_guest_mem(MEM); /* self-heals if MEM was not ready at setup */
+    hud_game_tick(now);
+    int ctx = hud_game_ctx();
+    int hidden = ctx == HUD_CTX_MENU && !g_ts.cfg.always_show;
+    /* one log line per menu->mission flip (loading always passes through
+     * MENU, so every real mission start is covered) */
+    if (!hidden && ctx == HUD_CTX_MISSION && g_ts.ctx_hidden)
+        OLOG("overlay: mission pawn=%08x", hud_pawn());
+    ts_set_context(&g_ts, hidden, now);
+
+    ts_tick(&g_ts, now);
     build_frame(&g_ts);
-    if (!g_nv) return;
+    if (!g_nv || (g_ts.ctx_hidden && g_ts.fade < 0.01f)) return;
 
     if (!g_logged_init) {
         g_logged_init = 1;
