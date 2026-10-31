@@ -69,8 +69,12 @@ static uint32_t vk_of_dik(uint8_t dik) {
 }
 
 void vinput_key_tap(uint8_t dik, int down) {
+    int was = s_keys[dik];
     vinput_key(dik, down);
-    user32_key_event(vk_of_dik(dik), dik, down);
+    /* Post the WM only on a real state edge: a second finger pressing the
+     * same tap button inside the 120 ms window must not send a duplicate
+     * WM_KEYDOWN (the DirectInput path dedupes by state, this one doesn't). */
+    if (was != (down ? 1 : 0)) user32_key_event(vk_of_dik(dik), dik, down);
 }
 
 uint32_t vinput_key_edges(void) { return s_edges; }

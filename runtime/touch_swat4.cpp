@@ -301,12 +301,23 @@ static void hud_safe_defaults(Safe *s, int w, int h) {
     (void)w;
 }
 
-/* Layout unit: h/720 scaled by config, capped so the tallest button stack
- * (392u right column + 64u top row) always fits between the safe insets. */
+/* Layout unit: h/720 scaled by config, fitted so the right column
+ * (FOGO+CMD+3xSLOTS/TAB/ESP) plus the top row always fit between the safe
+ * insets. Sizes have a 0.055h floor each, which makes the stack height
+ * u-dependent, so the fit runs two shrinking passes. */
 static float hud_unit(const HudCfg *cfg, int w, int h, const Safe *s) {
+    (void)w;
+    float avail = h - s->top - s->bottom;
     float u = h / 720.0f * cfg->scale;
-    float fit = (h - s->top - s->bottom) / 456.0f;
-    return minf(u, fit);
+    for (int i = 0; i < 2; i++) {
+        float f = maxf(150 * u, 0.055f * h), c = maxf(100 * u, 0.055f * h);
+        float sm = maxf(56 * u, 0.055f * h), e = maxf(64 * u, 0.055f * h);
+        float g = 10 * u;
+        float need = f + c + 3 * sm + 5 * g + e; /* 4 stack gaps + 1 clearance */
+        if (need <= avail) break;
+        u *= avail / need;
+    }
+    return u;
 }
 
 /* Buttons are at least 5.5% of the screen height so they stay tappable at
@@ -481,10 +492,14 @@ static void apply_release(const Btn *b) {
     }
 }
 
-/* (Re)build the layouts when the window size or safe area changed. */
+/* (Re)build the layouts when the window size or safe area changed. A real
+ * rebuild moves buttons out from under pressed fingers, so everything is
+ * released first: no key or mouse button can be left latched by a resize. */
+static void ts_release_all(TouchState *ts, uint32_t now);
 static void ts_ensure_layout(TouchState *ts, int w, int h, const Safe *s) {
     if (ts->nbtn && ts->w == w && ts->h == h &&
         !memcmp(&ts->safe, s, sizeof(*s))) return;
+    if (ts->nbtn) ts_release_all(ts, 0);
     ts->w = w;
     ts->h = h;
     ts->safe = *s;
@@ -553,6 +568,13 @@ static void ts_down(TouchState *ts, long fid, float x, float y, int w, int h, ui
             OLOG("overlay: slots grid open (page %d)", ts->grid_page);
         }
     } else if (in_zone(ts->zone, x, y)) {
+        /* one stick at a time: a second finger in the zone is consumed so
+         * two thumbs can never fight over WASD */
+        if (ts->stick_held > 0) {
+            fr->role = R_CONSUMED;
+            ts->active++;
+            return;
+        }
         fr->role = R_STICK;
         fr->ox = x;
         fr->oy = y; /* floating stick: the origin is where the finger landed */
@@ -1006,16 +1028,70 @@ int main(void) {
         ts_up(&ts, 1002);
     }
 
-    /* --- 11. tap dedupe: pressing again inside the window adds no pend --- */
+    /* --- 11. tap dedupe: pressing again inside the window adds no pend and
+     * no duplicate WM (WM only on real edges) --- */
     {
         const Btn *rec = tbtn(&ts, B_REC);
+        int wm0 = g_wm_n;
         ts_down(&ts, 1101, rec->x + rec->w / 2, rec->y + rec->h / 2, W, H, now);
         ts_down(&ts, 1102, rec->x + rec->w / 2, rec->y + rec->h / 2, W, H, now + 10);
         CHECK(ts.npend == 1);
+        CHECK(g_wm_n == wm0 + 1); /* exactly one WM_KEYDOWN */
         ts_tick(&ts, now + 300);
         CHECK(ts.npend == 0 && !vinput_keys()[DIK_R]);
+        CHECK(g_wm_n == wm0 + 2); /* plus exactly one WM_KEYUP */
+        /* re-press after the tap finished fires the whole action again */
+        ts_down(&ts, 1103, rec->x + rec->w / 2, rec->y + rec->h / 2, W, H, now + 400);
+        CHECK(vinput_keys()[DIK_R] && g_wm_n == wm0 + 3);
+        ts_tick(&ts, now + 600);
+        CHECK(!vinput_keys()[DIK_R] && g_wm_n == wm0 + 4);
         ts_up(&ts, 1101);
         ts_up(&ts, 1102);
+        ts_up(&ts, 1103);
+    }
+
+    /* --- 11b. a second finger in the stick zone is consumed, not a 2nd stick --- */
+    {
+        float sx = ts.zone[0] + ts.zone[2] * 0.5f, sy = ts.zone[1] + ts.zone[3] * 0.5f;
+        ts_down(&ts, 1110, sx, sy, W, H, now);
+        ts_move(&ts, 1110, sx + 70, sy - 70);
+        CHECK(vinput_keys()[DIK_W] && vinput_keys()[DIK_D]);
+        ts_down(&ts, 1111, sx + 10, sy + 10, W, H, now + 10); /* 2nd thumb */
+        CHECK(finger_find(&ts, 1111)->role == R_CONSUMED);
+        ts_move(&ts, 1111, sx - 70, sy + 70); /* opposite direction: ignored */
+        CHECK(vinput_keys()[DIK_W] && vinput_keys()[DIK_D] && !vinput_keys()[DIK_A] &&
+              !vinput_keys()[DIK_S]);
+        ts_up(&ts, 1111);
+        ts_up(&ts, 1110);
+        CHECK(!vinput_keys()[DIK_W] && !vinput_keys()[DIK_D]);
+    }
+
+    /* --- 11c. leash: dragging past the rim slides the origin, sector stable --- */
+    {
+        float sx = ts.zone[0] + ts.zone[2] * 0.5f, sy = ts.zone[1] + ts.zone[3] * 0.5f;
+        ts_down(&ts, 1115, sx, sy, W, H, now);
+        ts_move(&ts, 1115, sx + 60, sy - 60);
+        CHECK(vinput_keys()[DIK_W] && vinput_keys()[DIK_D]);
+        uint32_t e0 = vinput_key_edges();
+        ts_move(&ts, 1115, sx + 500, sy - 500); /* far past the rim */
+        ts_move(&ts, 1115, sx + 520, sy - 480); /* still NE after the leash */
+        CHECK(vinput_key_edges() == e0); /* no new edges: sector held */
+        CHECK(vinput_keys()[DIK_W] && vinput_keys()[DIK_D]);
+        ts_up(&ts, 1115);
+        CHECK(!vinput_keys()[DIK_W] && !vinput_keys()[DIK_D]);
+    }
+
+    /* --- 11d. resize while holding releases everything (no latched keys) --- */
+    {
+        const Btn *run = tbtn(&ts, B_CORRER);
+        ts_down(&ts, 1116, run->x + run->w / 2, run->y + run->h / 2, W, H, now);
+        CHECK(vinput_keys()[DIK_LSHIFT]);
+        ts_ensure_layout(&ts, W, H - 40, &s); /* a real rebuild */
+        CHECK(!vinput_keys()[DIK_LSHIFT]); /* hold released by the rebuild */
+        CHECK(ts.nbtn == 15);
+        ts_up(&ts, 1116); /* late UP: ignored */
+        CHECK(!vinput_keys()[DIK_LSHIFT]);
+        ts_ensure_layout(&ts, W, H, &s); /* restore */
     }
 
     /* --- 12. pend overflow: the 9th distinct pending tap releases at once --- */
@@ -1039,15 +1115,19 @@ int main(void) {
               !vinput_keys()[DIK_DEL]);
     }
 
-    /* --- 13. no two base buttons overlap (3 scales + mirrored) --- */
+    /* --- 13. no two base buttons overlap (3 scales + mirrored, 3 aspect ratios) --- */
     {
+        const int ws[3] = {W, 1024, 1280}, hs[3] = {H, 768, 800}; /* 16:9, 4:3, 16:10 */
+        for (int r = 0; r < 3; r++)
         for (int pass = 0; pass < 4; pass++) {
             HudCfg c;
             hud_cfg_defaults(&c);
             c.scale = pass == 0 ? 0.5f : pass == 1 ? 1.0f : 2.0f;
             c.handed = pass == 3;
             Btn bs[15];
-            CHECK(hud_layout(&c, W, H, &s, bs, 15) == 15);
+            Safe sr;
+            hud_safe_defaults(&sr, ws[r], hs[r]);
+            CHECK(hud_layout(&c, ws[r], hs[r], &sr, bs, 15) == 15);
             int ok = 1;
             for (int i = 0; i < 15 && ok; i++)
                 for (int j = i + 1; j < 15 && ok; j++) {
@@ -1186,7 +1266,7 @@ static void text_in(float x, float y, float w, float h, const char *s, uint32_t 
     float ty = y + (h - gh) * 0.5f;
     for (const char *p = s; *p; p++) {
         int idx = (uint8_t)*p - 32;
-        if (idx < 0 || idx > 94) idx = 63; /* '?' for anything off-atlas */
+        if (idx < 0 || idx > 94) idx = 31; /* '?' for anything off-atlas */
         if (*p != ' ') {
             float u0 = (float)(idx & 15) * 8.0f / 128.0f + 0.002f;
             float v0 = (float)(idx >> 4) * 8.0f / 64.0f + 0.002f;
@@ -1387,6 +1467,7 @@ extern "C" void touch_notify_reset(void) {
     /* Font atlas lives in D3DPOOL_MANAGED and survives Reset; the per-draw
      * state save/restore captures whatever the device holds at Present time,
      * so there is nothing to rebuild. Kept as a hook for future needs. */
+    g_font_fails = 0; /* a reset also clears transient init failures */
     OLOG("overlay: device reset (managed resources survive)");
 }
 
