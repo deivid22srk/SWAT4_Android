@@ -310,6 +310,13 @@ void B_IDirect3D9_CreateDevice(CPU *c) {
     splash_finish();  /* stop the splash + release its window surface before DXVK claims the window */
     D3DPRESENT_PARAMETERS pp;
     pp_from_guest(ARG(5), &pp);
+    /* Workaround for Android Vulkan drivers: D24S8 (75) is often unsupported
+     * or causes driver validation errors that lead to DXVK exceptions and
+     * FORTIFY aborts on device destruction. Remap to D24X8 (77). */
+    if (pp.EnableAutoDepthStencil && pp.AutoDepthStencilFormat == 75 /* D3DFMT_D24S8 */) {
+        LOG("d3d9: remapping D24S8 -> D24X8 for Android driver compatibility");
+        pp.AutoDepthStencilFormat = (D3DFORMAT)77 /* D3DFMT_D24X8 */;
+    }
     LOG("CreateDevice %ux%u fmt=%d ds=%d/%d windowed(guest)=%u flags=%x interval=%x",
         pp.BackBufferWidth, pp.BackBufferHeight, pp.BackBufferFormat, pp.EnableAutoDepthStencil,
         pp.AutoDepthStencilFormat, M32(ARG(5) + 32), ARG(4), pp.PresentationInterval);
@@ -386,6 +393,10 @@ void B_IDirect3DDevice9_Reset(CPU *c) {
     auto *d = (IDirect3DDevice9 *)com_host(ARG(0));
     D3DPRESENT_PARAMETERS pp;
     pp_from_guest(ARG(1), &pp);
+    if (pp.EnableAutoDepthStencil && pp.AutoDepthStencilFormat == 75 /* D3DFMT_D24S8 */) {
+        LOG("d3d9: remapping D24S8 -> D24X8 for Android driver compatibility");
+        pp.AutoDepthStencilFormat = (D3DFORMAT)77 /* D3DFMT_D24X8 */;
+    }
     HRESULT hr = d3d9_guard("Reset", [&] { return d->Reset(&pp); });
     pp_to_guest(&pp, ARG(1));
     /* Client == backbuffer, again: an in-game resolution change must keep
