@@ -2,6 +2,7 @@
  * Game controllers are listed only so the game finds its XInput pads: it
  * enumerates them here and keeps those IsXInputDevice (input.c) accepts. */
 #include "hcom.h"
+#include "vinput.h"
 #include <SDL2/SDL.h>
 const Uint8 *platform_keys(int *n);
 
@@ -95,14 +96,23 @@ SHIM(dev_GetDeviceState) {
                 uint8_t k = dik_of((SDL_Scancode)i);
                 if (k && k < n) M8(p + k) = 0x80;
             }
+        /* touch overlay keys (hold buttons, stick sectors) */
+        const uint8_t *vks = vinput_keys();
+        for (int k = 0; k < 256 && k < (int)n; k++)
+            if (vks[k]) M8(p + k) = 0x80;
     } else {
-        int x, y;
+        /* SDL relative mouse + what the touch overlay accumulated since the
+         * last poll (deltas and buttons). The Z axis stays 0: SWAT 4's
+         * DefUser.ini binds weapons to 1-0/F1-F10, not to a mouse wheel. */
+        int x, y, vx, vy;
         Uint32 b = SDL_GetRelativeMouseState(&x, &y);
-        M32(p) = (uint32_t)x;
-        M32(p + 4) = (uint32_t)y;
+        vinput_mouse_take(&vx, &vy);
+        M32(p) = (uint32_t)(x + vx);
+        M32(p + 4) = (uint32_t)(y + vy);
         M32(p + 8) = 0;
+        uint32_t vb = vinput_mouse_buttons();
         for (int i = 0; i < 3 && 12 + (uint32_t)i < n; i++)
-            M8(p + 12 + i) = (b & SDL_BUTTON(i + 1)) ? 0x80 : 0;
+            M8(p + 12 + i) = ((b & SDL_BUTTON(i + 1)) || (vb & (1u << i))) ? 0x80 : 0;
     }
     RET(0, 3);
 }
@@ -110,12 +120,15 @@ SHIM(dev_GetDeviceState) {
 static void dik_state(uint8_t out[256]) {
     int nk;
     const Uint8 *ks = platform_keys(&nk);
+    const uint8_t *vks = vinput_keys();
     memset(out, 0, 256);
     for (int i = 0; i < nk; i++)
         if (ks[i]) {
             uint8_t k = dik_of((SDL_Scancode)i);
             if (k) out[k] = 0x80;
         }
+    for (int k = 0; k < 256; k++)
+        if (vks[k]) out[k] = 0x80; /* overlay keys feed the buffered queue too */
 }
 SHIM(dev_GetDeviceData) {
     DIDev *d = hcom_host(ARG(0));

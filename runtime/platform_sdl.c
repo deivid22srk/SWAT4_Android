@@ -2,6 +2,7 @@
  * The same code runs on desktop Linux and on Android. */
 #include "game.h"
 #include "rt.h"
+#include "vinput.h"
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_vulkan.h>
 #include <math.h>
@@ -254,12 +255,27 @@ static void script_events(void) {
     }
 }
 
+extern uint32_t dinput_dik_of(int sdl_scancode);
+
 const Uint8 *platform_keys(int *n) {
     int nk;
     const Uint8 *ks = SDL_GetKeyboardState(&nk);
-    if (!g_nscript || g_padonly) { if (n) *n = nk; return ks; }
+    int scripted = g_nscript && !g_padonly;
+    int virtual_ = vinput_active(); /* touch overlay keys (stick, hold buttons) */
+    if (!scripted && !virtual_) { if (n) *n = nk; return ks; }
+    /* vinput state is DIK-indexed while this table is SDL-scancode-indexed:
+     * copy so it can be OR-ed, mapping each scancode through the same DIK
+     * table the DirectInput shim uses (identity for overlay keys). */
     memcpy(g_keys, ks, nk < SDL_NUM_SCANCODES ? nk : SDL_NUM_SCANCODES);
-    for (int i = 0; i < g_nscript; i++)
+    if (virtual_) {
+        const uint8_t *vks = vinput_keys();
+        for (int i = 0; i < nk; i++)
+            if (!g_keys[i]) {
+                uint32_t d = dinput_dik_of(i);
+                if (d && vks[d]) g_keys[i] = 1;
+            }
+    }
+    for (int i = 0; i < g_nscript && scripted; i++)
         if (g_frames >= g_script[i].frame && g_frames < g_script[i].frame + g_script[i].len) g_keys[g_script[i].sc] = 1;
     if (n) *n = SDL_NUM_SCANCODES;
     return g_keys;

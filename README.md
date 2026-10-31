@@ -32,7 +32,7 @@ em um repositório **privado** separado, `deivid22srk/SWAT4_codegen`.
 | Áudio OpenAL 1.x + EAX + Vorbis | **Inicializa no desktop** | alias `OpenAL32`→`DefOpenAL32`; device ALAudio sobe; EAX/voz não validados |
 | Vídeo Bink | **Módulo no mapa, não validado** | `binkw32.dll`, `FBinkMovie` |
 | Launcher (pasta, tamanho + SHA-1, lista do que falta) | **Implementado, não testado em aparelho** | `LauncherActivity.java`; classes presentes no APK |
-| Overlay de toque | **Não implementado** | stub `runtime/touch_swat4.cpp` |
+| Overlay de toque | **Etapa 1 implementada** (base jogável) | `runtime/touch_swat4.cpp` + `runtime/vinput.c`; selftest `scripts/test_touch.sh` no CI |
 | CI (`build.yml`) | **Verde nos dois modos** | app-only público (APK 2 MB); completo privado (APK 24 MB, `libmain.so` 56 MB, 80.848 funções) |
 | **Jogo chega ao menu principal** | **Não** | não há otimismo aqui |
 
@@ -154,12 +154,26 @@ Bindings **reais** do PC, lidos de `Content/System/DefUser.ini`:
 | Trocar oficial | Delete |
 | Mirar (eixo) | mouse |
 
-Mapeamento planejado para Android (ainda **não implementado**): analógico
-esquerdo = movimento, direito = olhar/mirar; RT = atirar; LT = zoom; RB =
-recarregar; LB = agachar; A = interagir/compliance; X/Y = inclinar; B = menu de
-comandos do esquadrão (equivalente ao botão direito); gatilhos extras para
-correr e trocar de arma. Controle físico e teclado/mouse serão suportados via
-SDL2; o overlay de toque é um stub hoje.
+Mapeamento Android implementado (overlay de toque, etapa 1): stick virtual
+flutuante no canto inferior esquerdo = movimento (setores digitais WASD, com
+deadzone e histerese — o jogo PC só aceita movimento digital); arrastar em
+qualquer outra área = olhar/mirar (deltas de mouse, sensibilidade e inversão
+configuráveis). Botões: FOGO = atirar (segurar); CMD = menu de comandos do
+esquadrão, equivalente ao botão direito (segurar e clicar no menu do jogo);
+USAR = compliance/interagir (botão do meio); REC = recarregar; AGACH = agachar;
+CORRER = correr (segurar); ZOOM; MODO = modo de tiro; INC< / INC> = inclinar
+(segurar); ESC = pausa/menu; ESP = comando padrão; TAB = próximo grupo;
+TROCA = trocar oficial; SLOTS = grade de equipamento (1–0 e F1–F10, duas
+páginas). Controle físico e teclado/mouse continuam suportados via SDL2.
+
+### Ajustes do overlay (`<pasta do jogo>/port/hud.ini`)
+
+Criado com os defaults na primeira execução; edite e reinicie o jogo.
+`scale` (0.5–2.0) tamanho dos botões; `opacity` (0.15–1.0); `look_sens`
+(0.2–3.0) sensibilidade do olhar; `look_invert_y`; `handed` (1 = canhoto);
+`labels` (0/1 textos nos botões); `stick_radius` (0.7–1.6); `hold_crouch` e
+`hold_zoom` (AGACH/ZOOM enviam toque de 120 ms por padrão, o modo toggle do
+jogo; mude para 1 se o seu User.ini usar agachar/zoom por pressionar).
 
 ## Troubleshooting
 
@@ -176,7 +190,10 @@ SDL2; o overlay de toque é um stub hoje.
 * O runtime cobre só parte das 1.201 APIs de SO importadas; as demais abortam
   com o nome.
 * D3D9/dxvk, OpenAL, Bink e input não foram validados em aparelho.
-* Sem overlay de toque; sem menu de comandos do esquadrão na tela.
+* O overlay de toque (etapa 1) está sempre visível em jogo: não há detecção de
+  menu/estado do jogo ainda (etapa 3); botões como FOGO enviam cliques que
+  também interagem com menus do jogo. Sem menu de comandos do esquadrão
+  desenhado pelo overlay (o menu do jogo é usado via CMD).
 * Expansão não suportada.
 * GameSpy/multiplayer e o cliente de anúncios Massive estão fora do escopo
   (stubs).

@@ -141,6 +141,7 @@ uint32_t d3d9_wrap(void *host, int iface) {
 // ---------------------------------------------------------------- structs
 extern "C" int touch_available(void);
 extern "C" void touch_draw(void *d);
+extern "C" void touch_notify_reset(void);
 
 static void pp_from_guest(uint32_t g, D3DPRESENT_PARAMETERS *pp) {
     memset(pp, 0, sizeof *pp);
@@ -317,6 +318,7 @@ void B_IDirect3DDevice9_Reset(CPU *c) {
     pp_from_guest(ARG(1), &pp);
     HRESULT hr = d->Reset(&pp);
     pp_to_guest(&pp, ARG(1));
+    touch_notify_reset(); // overlay state died with the device (font atlas survives)
     LOG("Reset %ux%u -> %08x", pp.BackBufferWidth, pp.BackBufferHeight, (uint32_t)hr);
     RET(hr, 2);
 }
