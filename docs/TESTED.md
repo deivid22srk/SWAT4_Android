@@ -1063,3 +1063,68 @@ REC, ZOOM, MODO, AGACH, CORRER, INC<, INC>, TAB, ESP, ESC, TROCA + grade
   próprio jogo), TROCA/TAB etc. ignorados pelo player — inofensivo.
 * Missão: idêntico ao build anterior (stick, look, botões, grade), com
   PORTA sempre presente (realce azul perto de porta real).
+
+## 2026-11-01 — glog (pastebin geT8Duxw): HUD input morto em menu/vídeo + abort FORTIFY no fechamento
+
+Log do aparelho (motorola edge 30 fusion, build 58519e2): usuário parado nas
+telas iniciais (vídeos), "clico em todos botões e ele não pula", e o app
+fecha. Duas causas raiz distintas, ambas medidas no log.
+
+### 1. Nenhum botão do HUD funcionava fora de missão — drain da ring condicionado a eventos SDL
+
+`platform_present_hook` chamava `hud_pump()` (que drena a ring SPSC do HUD
+Java) **dentro** do loop `while (SDL_PollEvent(&e))`. Com o overlay Java
+consumindo 100% dos toques, a fila de eventos do SDL fica **vazia** exatamente
+quando o usuário está em menu, vídeo ou missão parada — o corpo do loop não
+roda, `hud_pump` não é chamado, e os intents (ESC do chip, clique do menu,
+WASD do stick, look) se acumulam na ring **sem nunca chegar ao jogo**. Isso
+explica em cadeia: vídeos não puláveis, Career/Training inclicável, "não sei
+se o HUD está funcionando" — nada chegava.
+
+**Correção**: `hud_pump()` uma vez por Present, FORA do loop de eventos
+(mesma thread, mesmo contrato de single-thread). Custo: uma checagem de ring
+vazia por frame.
+
+### 2. "Ele tá fechando" — abort FORTIFY no teardown
+
+Linha final do log:
+
+```
+1793464487.649 Surface::disconnect (GameActivity)
+1793464487.757 F libc: FORTIFY: pthread_mutex_lock called on a destroyed mutex
+```
+
+Cadeia: saída → `exit(0)` no handler de SDL_QUIT → cadeia atexit → SDL_Quit
+→ teardown de vídeo Android que trava mutex já destruído (`onDestroy` →
+`nativeQuit` destrói `Android_ActivityMutex`; a SDL thread ainda pode bombá-lo
+no caminho de saída). **Correção**: SDL_QUIT → `_exit(0)` (sem teardown; o
+SO recupera tudo). Os outros caminhos de saída do runtime já usavam `_exit`
+(`ExitProcess`, `TerminateProcess`, msvcrt `exit`, sinais).
+
+### 3. Evidência de campo nova
+
+A cada 300 frames o log passa a imprimir (só quando muda):
+
+```
+hud: N applied, M dropped, ctx C
+```
+
+`N` = intents aplicados na game thread (contador novo `hud_applied_events`),
+`M` = drops por overflow, `C` = contexto (0 UNKNOWN / 1 MENU / 2 MISSION).
+No próximo log do aparelho dá para PROVAR que o input do HUD chega: tocar
+ESC no vídeo deve aumentar `N` na linha seguinte.
+
+### Validação local
+
+* `sh scripts/test_hud.sh` — `hud_jni selftest: ok`, `hud_state selftest:
+  ok`, contrato vinput: ok;
+* `gcc -fsyntax-only` runtime/*.c (flags reais): rc=0; `g++ -fsyntax-only`
+  hud_state.cpp (DXVK native, C++17): rc=0.
+
+### O que esperar no aparelho
+
+* Vídeos: ESC (chip) e toque em qualquer lugar pulam (clique do jogo);
+* Menu: toque direto nos itens funciona; stick = setas;
+* Missão: stick/botões/look respondem de imediato;
+* Fechar o jogo (voltar/sair) sem abort — processo encerra limpo;
+* log.txt: linhas `hud: N applied…` crescendo conforme o HUD é usado.

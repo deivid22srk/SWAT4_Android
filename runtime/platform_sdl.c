@@ -6,6 +6,7 @@
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_vulkan.h>
 #include <math.h>
+#include <unistd.h>   /* _exit: teardown-free quit (see SDL_QUIT below) */
 #ifndef __ANDROID__
 #include <fcntl.h>
 #endif
@@ -333,26 +334,52 @@ void platform_present_hook(void) {
         if (e.type == SDL_QUIT) {
             LOG("quit requested");
             fflush(NULL);
-            exit(0);
+            /* _exit, never exit(): the atexit chain runs SDL_Quit, whose
+             * Android video teardown races the activity's own destroy
+             * (onDestroy -> nativeQuit destroys Android_ActivityMutex
+             * while this thread can still pump it) and aborts with
+             * "FORTIFY: pthread_mutex_lock called on a destroyed mutex"
+             * (field log glog). The OS reclaims everything anyway. */
+            _exit(0);
         }
         if (e.type == SDL_KEYDOWN || e.type == SDL_KEYUP)
             key_event(e.key.keysym.scancode, e.type == SDL_KEYDOWN);
         extern void input_handle_event(const SDL_Event *e);
         input_handle_event(&e);
-        /* The touch HUD lives in the Android activity (Java); its synthetic
-         * intents arrive through hud_pump (ring drained on THIS thread, the
-         * single-thread contract vinput/user32 were built on), which also
-         * ticks the game-state scan that feeds the HUD context. SDL touch
-         * events are not consumed here anymore: the Java overlay handles
-         * every finger and posts final intents instead. */
-        {
-            extern void hud_pump(uint32_t now_ms, const void *guest_mem);
-            hud_pump(SDL_GetTicks(), MEM); /* x86.h: the flat 4 GiB region */
-        }
+    }
+    /* The touch HUD lives in the Android activity (Java); its synthetic
+     * intents arrive through hud_pump (ring drained on THIS thread, the
+     * single-thread contract vinput/user32 were built on), which also
+     * ticks the game-state scan that feeds the HUD context. This MUST be
+     * once per present, NOT inside the SDL_PollEvent loop: the Java
+     * overlay consumes every finger, so SDL events are rare while the
+     * user sits in a menu, a movie or a quiet mission — a drain gated on
+     * SDL events meant HUD presses piled up in the ring and NEVER
+     * reached the game exactly there (intro videos unskippable, menu
+     * clicks dead, field log glog). SDL touch events are not consumed
+     * here: the Java overlay posts final intents instead. */
+    {
+        extern void hud_pump(uint32_t now_ms, const void *guest_mem);
+        hud_pump(SDL_GetTicks(), MEM); /* x86.h: the flat 4 GiB region */
     }
     script_events();
     g_frames++;
-    if (g_frames % 300 == 0) LOG("frame %d", g_frames);
+    if (g_frames % 300 == 0) {
+        LOG("frame %d", g_frames);
+        /* field evidence that HUD intents flow (ring applied/dropped and
+         * the live context), only when the counters moved since the last
+         * report: one line per 300 frames at most */
+        extern uint32_t hud_applied_events(void);
+        extern uint32_t hud_dropped_events(void);
+        extern int hud_game_ctx(void);
+        static uint32_t la = 0xFFFFFFFFu, ld;
+        uint32_t a = hud_applied_events(), d = hud_dropped_events();
+        if (a != la || d != ld) {
+            LOG("hud: %u applied, %u dropped, ctx %d", a, d, hud_game_ctx());
+            la = a;
+            ld = d;
+        }
+    }
     if (g_frames % 60 == 0) fflush(stderr);  /* fully buffered log: periodic flush */
     {   /* canary: the main thread's static TLS pointer (TEB slot 0 +0x2C) */
         static uint32_t last;

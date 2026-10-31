@@ -54,6 +54,7 @@ static HQEv hq_ring[HQ_N];
 static uint32_t hq_tail;        /* producer-private write cursor        */
 static uint32_t hq_head;        /* consumer-private read cursor         */
 static uint32_t hq_dropped;     /* diagnostics: overflow drops          */
+static uint32_t hq_applied;     /* diagnostics: events drained+applied  */
 
 /* Called from the Java UI thread. Never blocks; drops on overflow. */
 void hud_post(uint32_t t, uint32_t a, uint32_t b) {
@@ -98,6 +99,7 @@ void hud_drain(void) {
         if (head == tail) break;
         HQEv e = hq_ring[head & HQ_MASK];
         __atomic_store_n(&hq_head, head + 1, __ATOMIC_RELEASE);
+        hq_applied++;
         hud_apply(&e);
     }
 }
@@ -116,6 +118,7 @@ void hud_pump(uint32_t now_ms, const void *guest_mem) {
 }
 
 uint32_t hud_dropped_events(void) { return hq_dropped; }
+uint32_t hud_applied_events(void) { return hq_applied; }
 
 /* ------------------------------------------------------------------ */
 /* JNI (Android build only; the host selftest uses the plain C above). */
