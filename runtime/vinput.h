@@ -1,17 +1,18 @@
-/* Virtual input synthesis: the touch overlay (touch_swat4.cpp) drives the
- * game through this layer instead of a real mouse/keyboard. The DirectInput
- * shim (dinput.c) ORs this state into the device data the game polls, and
- * key taps additionally post WM_KEYDOWN/WM_KEYUP through user32_key_event,
- * mirroring what platform_sdl.c does for real SDL keys.
+/* Virtual input synthesis: the touch HUD (now a Java View in the Android
+ * activity) drives the game through this layer instead of a real
+ * mouse/keyboard. The DirectInput shim (dinput.c) ORs this state into the
+ * device data the game polls, and key taps additionally post WM_KEYDOWN/WM_KEYUP
+ * through user32_key_event, mirroring what platform_sdl.c does for real SDL keys.
  *
  * extern "C" matters here: vinput.c is built by the C compiler in the real
- * builds (runtime/*.c glob) while touch_swat4.cpp is C++, and the overlay
- * selftest links the same two ABIs together.
+ * builds (runtime/*.c glob) while hud_state.cpp/hud_jni callers may be C++, and
+ * the hud selftests link the same two ABIs together.
  *
- * Single-thread contract: producers (overlay event pump and overlay draw,
- * both on the main thread via platform_present_hook) and consumers (the
- * game's DirectInput polls, also on the main thread) never run concurrently,
- * so plain volatile accesses suffice; no locks, zero allocation. */
+ * Single-thread contract: producers (the hud_jni ring drain and the state
+ * scan, both on the game's main thread via platform_present_hook) and
+ * consumers (the game's DirectInput polls, same thread) never run
+ * concurrently on this side; the Java UI thread only pushes into the
+ * lock-free SPSC ring and never touches vinput directly. */
 #ifndef VINPUT_H
 #define VINPUT_H
 

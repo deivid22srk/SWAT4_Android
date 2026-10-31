@@ -27,6 +27,36 @@ public class GameActivity extends SDLActivity {
     protected void onCreate(Bundle savedInstanceState) {
         saveLastExit();
         super.onCreate(savedInstanceState);
+        installHud();
+    }
+
+    @Override
+    protected void onPause() {
+        /* a held FOGO/CORRER must not survive the app going away */
+        if (hud != null) hud.releaseAll();
+        super.onPause();
+    }
+
+    private HudOverlay hud; /* kept for onPause: drop held buttons */
+
+    /* The contextual touch HUD: a real Android View composited above the
+     * game surface (visible through menus, movies and loading frames) that
+     * converts touches into the game's own input via HudBridge. SDLActivity
+     * built its RelativeLayout and SDLSurface inside super.onCreate(), so
+     * adding ours to the content frame now puts it deterministically on
+     * top; if the runtime bridge is missing the view stays passive. */
+    private void installHud() {
+        try {
+            android.view.ViewGroup content =
+                    (android.view.ViewGroup) findViewById(android.R.id.content);
+            if (content == null) return;
+            hud = new HudOverlay(this, getIntent().getStringExtra("game"));
+            content.addView(hud, new android.view.ViewGroup.LayoutParams(
+                    android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+                    android.view.ViewGroup.LayoutParams.MATCH_PARENT));
+        } catch (Throwable ignored) {
+            /* a HUD failure must never take the game down */
+        }
     }
 
     /* Why the previous run ended (crash, low-memory kill, ...), kept in

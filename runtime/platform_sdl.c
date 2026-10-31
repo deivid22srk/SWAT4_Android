@@ -339,8 +339,16 @@ void platform_present_hook(void) {
             key_event(e.key.keysym.scancode, e.type == SDL_KEYDOWN);
         extern void input_handle_event(const SDL_Event *e);
         input_handle_event(&e);
-        extern void touch_handle_event(const SDL_Event *e);
-        touch_handle_event(&e);
+        /* The touch HUD lives in the Android activity (Java); its synthetic
+         * intents arrive through hud_pump (ring drained on THIS thread, the
+         * single-thread contract vinput/user32 were built on), which also
+         * ticks the game-state scan that feeds the HUD context. SDL touch
+         * events are not consumed here anymore: the Java overlay handles
+         * every finger and posts final intents instead. */
+        {
+            extern void hud_pump(uint32_t now_ms, const void *guest_mem);
+            hud_pump(SDL_GetTicks(), MEM); /* x86.h: the flat 4 GiB region */
+        }
     }
     script_events();
     g_frames++;

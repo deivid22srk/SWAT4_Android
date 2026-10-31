@@ -32,4 +32,5 @@ extern "C" {
 void *platform_window(void);
 void platform_present_hook(void);
 void splash_finish(void);  /* stop the loading splash; releases the window surface */
+void user32_set_screen(int w, int h);  /* guest GetClientRect/GetCursorPos space */
 }

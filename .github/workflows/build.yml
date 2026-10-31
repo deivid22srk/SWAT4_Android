@@ -74,11 +74,12 @@ jobs:
           cmake --version | head -1
           $ANDROID_HOME/ndk/$NDK_VERSION/ndk-build --version || true
 
-      # Touch overlay: pure-logic selftest + real-ABI link check (no SDK needed).
-      # Fails the build before Gradle if the overlay logic or the C/C++ link broke.
-      - name: Touch overlay selftest
+      # Touch HUD (Java) bridge: ring selftest + hud_state selftest + real-ABI
+      # link check (no SDK needed). Fails the build before Gradle if the
+      # Java<->runtime input path or the game-state reader broke.
+      - name: Touch HUD bridge selftest
         run: |
-          sh scripts/test_touch.sh
+          sh scripts/test_hud.sh
 
       - name: Gradle cache
         uses: actions/cache@v4

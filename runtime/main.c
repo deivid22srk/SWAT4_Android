@@ -620,8 +620,10 @@ extern void platform_init(void);
     for (; g_dll_modules[ndll]; ndll++)
         g_dll_entry[ndll] = load_pe(g_dll_modules[ndll], g_dll_bases[ndll], g_dll_modules[ndll]);
     load_pe(GAME_EXE, 0, GAME_EXE);
-    extern void touch_setup_guest(void);
-    touch_setup_guest();
+    /* The touch HUD moved to the Android activity (Java). The runtime only
+     * keeps vinput (input synthesis), hud_state (game context) and the
+     * hud_jni ring that carries Java intents to the game thread — wired in
+     * platform_present_hook. No C-side setup remains here. */
     /* Wrap the game allocator's Free/Realloc so untracked (foreign) pointers
      * cannot walk the protected null page (boot crash at guest 0x1190). */
     extern void swat4_gmalloc_guard_install(void);

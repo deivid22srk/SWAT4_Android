@@ -69,6 +69,12 @@ static uint32_t vk_of_dik(uint8_t dik) {
     case 0x39: return 0x20; /* Space */
     case 0x1C: return 0x0D; /* Enter */
     case 0xD3: return 0x2E; /* Delete */
+    /* arrows: the Java HUD navigates SWAT 4's menus with the stick the way
+     * a keyboard does (UE2 GUI focus moves on the WM, not on DI state) */
+    case 0xC8: return 0x26; /* Up */
+    case 0xD0: return 0x28; /* Down */
+    case 0xCB: return 0x25; /* Left */
+    case 0xCD: return 0x27; /* Right */
     default: return 0;
     }
 }

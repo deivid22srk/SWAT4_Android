@@ -154,17 +154,42 @@ Bindings **reais** do PC, lidos de `Content/System/DefUser.ini`:
 | Trocar oficial | Delete |
 | Mirar (eixo) | mouse |
 
-Mapeamento Android implementado (overlay de toque, etapa 1): stick virtual
-flutuante no canto inferior esquerdo = movimento (setores digitais WASD, com
-deadzone e histerese — o jogo PC só aceita movimento digital); arrastar em
-qualquer outra área = olhar/mirar (deltas de mouse, sensibilidade e inversão
-configuráveis). Botões: FOGO = atirar (segurar); CMD = menu de comandos do
-esquadrão, equivalente ao botão direito (segurar e clicar no menu do jogo);
-USAR = compliance/interagir (botão do meio); REC = recarregar; AGACH = agachar;
-CORRER = correr (segurar); ZOOM; MODO = modo de tiro; INC< / INC> = inclinar
-(segurar); ESC = pausa/menu; ESP = comando padrão; TAB = próximo grupo;
-TROCA = trocar oficial; SLOTS = grade de equipamento (1–0 e F1–F10, duas
-páginas). Controle físico e teclado/mouse continuam suportados via SDL2.
+Mapeamento Android implementado (HUD de toque contextual, na camada Java):
+um `HudOverlay` (View Android acima da superfície do jogo) desenha o HUD e
+converte cada toque na entrada real do jogo via `HudBridge` (fila lock-free
+drenada pela thread do jogo, que aplica tudo em `vinput` → DirectInput/WM).
+Contexto por estado REAL do jogo (`runtime/hud_state.cpp` varre o array de
+objetos da engine, 1 s):
+
+* **MISSÃO** (existe `ASwatPlayer`): analógico fixo sempre visível no canto
+  inferior esquerdo = movimento (setores digitais WASD, deadzone + histerese —
+  o jogo PC só aceita movimento digital); arrastar em qualquer outra área =
+  olhar/mirar (deltas de mouse, sensibilidade e inversão configuráveis).
+  Botões: FOGO = atirar (segurar); CMD = menu de comandos do esquadrão,
+  equivalente ao botão direito (segurar e clicar no menu do jogo); USAR =
+  compliance/interagir (botão do meio); REC = recarregar; AGACH = agachar;
+  CORRER = correr (segurar); ZOOM; MODO = modo de tiro; INC< / INC> =
+  inclinar (segurar); ESC = pausa/menu; ESP = comando padrão; TAB = próximo
+  grupo; TROCA = trocar oficial; SLOTS = grade de equipamento (1–0 e F1–F10,
+  duas páginas). O chip **PORTA** (F) só aparece quando uma porta real
+  (`ASwatDoor`) está dentro do alcance de uso do próprio jogo (128 unidades,
+  `PlayerInterface_Use.ini`).
+* **MENU** (sem pawn: menus, filmes, debriefing): o HUD some; cada dedo vira
+  o mouse do jogo (WM_MOUSEMOVE/LBUTTONDOWN nas coordenadas de cliente do
+  hóspede — clique direto em Career/Training etc.), o analógico vira as
+  setas de navegação do menu, e um chip **ESC** fica no canto superior
+  direito (pular filmes de introdução / voltar — o Esc do próprio jogo).
+* **UNKNOWN** (boot/carregamento): nada é desenhado; toques viram cliques
+  inofensivos.
+
+Por que Java: a View é composta PELO SISTEMA acima da superfície do jogo —
+o HUD atravessa swapchains de menu, filmes Bink e frames de carregamento,
+e o tamanho é definido em dp (nada de botões gigantes por fator de escala
+do render). O runtime ainda guarda `vinput` (síntese de entrada),
+`hud_state` (contexto) e `hud_jni` (ponte); o shim `GetAsyncKeyState`
+também reflete o input virtual (caminhos que pollam estado assíncrono,
+como o loop de filmes). Controle físico e teclado/mouse continuam
+suportados via SDL2.
 
 ### Ajustes do overlay (`<pasta do jogo>/port/hud.ini`)
 
@@ -186,14 +211,11 @@ jogo; mude para 1 se o seu User.ini usar agachar/zoom por pressionar).
 
 ## Problemas conhecidos
 
-* O jogo **não chega ao menu principal**.
 * O runtime cobre só parte das 1.201 APIs de SO importadas; as demais abortam
   com o nome.
-* D3D9/dxvk, OpenAL, Bink e input não foram validados em aparelho.
-* O overlay de toque (etapa 1) está sempre visível em jogo: não há detecção de
-  menu/estado do jogo ainda (etapa 3); botões como FOGO enviam cliques que
-  também interagem com menus do jogo. Sem menu de comandos do esquadrão
-  desenhado pelo overlay (o menu do jogo é usado via CMD).
+* HUD de toque contextual Java (ver acima): cliques diretos nos menus e
+  filmes puláveis com ESC/clique são os caminhos cobertos; se o jogo usar
+  uma API de input fora deles, o log nomeia a API — é bug do port.
 * Expansão não suportada.
 * GameSpy/multiplayer e o cliente de anúncios Massive estão fora do escopo
   (stubs).

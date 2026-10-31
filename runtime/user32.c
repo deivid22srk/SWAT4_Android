@@ -2,6 +2,7 @@
  * the guest only sees a fake HWND. Messages the guest needs (activation,
  * close) are delivered by calling its window procedure directly. */
 #include "rt.h"
+#include "vinput.h"
 #include <string.h>
 #include <pthread.h>
 #include <SDL2/SDL.h>
@@ -13,6 +14,15 @@ static int g_quit;
 
 uint32_t user32_wndproc(void) { return g_wndproc; }
 void user32_set_screen(int w, int h) { g_screen_w = w; g_screen_h = h; }
+
+/* Read-only access for the Java HUD bridge: the overlay maps finger pixels
+ * to guest client pixels, so it needs the same rect GetClientRect reports.
+ * Written once at boot and re-synced on device (re)creation — reads from
+ * the UI thread are advisory layout data, not game state. */
+void user32_get_screen(int *w, int *h) {
+    if (w) *w = g_screen_w;
+    if (h) *h = g_screen_h;
+}
 
 /* ------------------------------------------------------------------ */
 /* Window registry. Real Win32 binds the C++ window object to its HWND
@@ -339,6 +349,55 @@ SHIM(GetCursorPos) {
 static void put_rect(uint32_t p) { M32(p) = 0; M32(p + 4) = 0; M32(p + 8) = (uint32_t)g_screen_w; M32(p + 12) = (uint32_t)g_screen_h; }
 SHIM(GetWindowRect) { put_rect(ARG(1)); RET(1, 2); }
 SHIM(GetClientRect) { put_rect(ARG(1)); RET(1, 2); }
+
+/* Async key state for the virtual input the Java HUD synthesizes. Movie
+ * playback (Engine.dll UMovie over binkw32) and some menu paths poll this
+ * API instead of reading the message queue or DirectInput, so the overlay's
+ * clicks and Esc taps were invisible there — the intro videos could not be
+ * skipped. Returns 0x8000 while the key/button is held (high bit set),
+ * 0 otherwise; the "pressed since last call" low bit is not tracked. */
+static uint8_t dik_of_vk(uint32_t vk) {
+    switch (vk) {
+    case 0x01: case 0x02: case 0x04: return 0; /* mouse: handled inline */
+    case 0x08: return 0x0E; /* Backspace */
+    case 0x09: return 0x0F; /* Tab */
+    case 0x0D: return 0x1C; /* Enter */
+    case 0x10: return 0x2A; /* Shift */
+    case 0x1B: return 0x01; /* Esc */
+    case 0x20: return 0x39; /* Space */
+    case 0x21: case 0x22: return 0; /* PgUp/PgDn unused by the HUD */
+    case 0x25: return 0xCB; /* Left */
+    case 0x26: return 0xC8; /* Up */
+    case 0x27: return 0xCD; /* Right */
+    case 0x28: return 0xD0; /* Down */
+    case 0x2E: return 0xD3; /* Delete */
+    default: break;
+    }
+    if (vk >= '0' && vk <= '9') return vk == '0' ? 0x0B : 0x02 + (uint8_t)(vk - '1');
+    if (vk >= 'A' && vk <= 'Z') { /* only the keys the HUD can synthesize */
+        static const struct { char c; uint8_t dik; } map[] = {
+            {'A', 0x1E}, {'C', 0x2E}, {'D', 0x20}, {'E', 0x12}, {'F', 0x21},
+            {'Q', 0x10}, {'R', 0x13}, {'S', 0x1F}, {'W', 0x11}, {'X', 0x2D}, {'Z', 0x2C},
+        };
+        for (unsigned i = 0; i < sizeof map / sizeof map[0]; i++)
+            if (map[i].c == (char)vk) return map[i].dik;
+        return 0;
+    }
+    if (vk >= 0x70 && vk <= 0x79) return 0x3B + (uint8_t)(vk - 0x70); /* F1..F10 */
+    return 0;
+}
+SHIM(GetAsyncKeyState) {
+    uint32_t vk = ARG(0);
+    int down = 0;
+    if (vk == 0x01) down = (int)(vinput_mouse_buttons() & 1u);
+    else if (vk == 0x02) down = (int)(vinput_mouse_buttons() & 2u);
+    else if (vk == 0x04) down = (int)(vinput_mouse_buttons() & 4u);
+    else {
+        uint8_t dik = dik_of_vk(vk);
+        if (dik) down = vinput_keys()[dik];
+    }
+    RET(down ? 0x8000u : 0u, 1);
+}
 SHIM(GetDeviceCaps) { uint32_t i = ARG(1); RET(i == 12 ? 32 : i == 8 ? g_screen_w : i == 10 ? g_screen_h : i == 116 ? 60 : 0, 2); }
 
 
@@ -390,7 +449,7 @@ static const ShimDef defs[] = {
     S(GetSystemMetrics) S(SystemParametersInfoA) S(LoadIconA) S(LoadCursorA) S(SetCursor) S(SetCursorPos)
     S(ShowCursor) S(LoadKeyboardLayoutA) S(MapVirtualKeyExA) S(PeekMessageA) S(TranslateMessage)
     S(DispatchMessageA) S(SendMessageA) S(PostQuitMessage) S(DefWindowProcA) S(MessageBoxA) S(MessageBoxW)
-    S(GetTopWindow) S(GetActiveWindow) S(GetWindow) S(UnregisterClassA) S(EndPaint) S(ReleaseDC) S(IsWindowVisible) S(ChangeDisplaySettingsA) S(RegisterClassA) S(GetDC) S(GetClassLongA) S(BeginPaint) S(GetWindowThreadProcessId) S(ClientToScreen) S(ScreenToClient) S(GetCursorPos) S(GetWindowRect) S(GetClientRect)
+    S(GetTopWindow) S(GetActiveWindow) S(GetWindow) S(UnregisterClassA) S(EndPaint) S(ReleaseDC) S(IsWindowVisible) S(ChangeDisplaySettingsA) S(RegisterClassA) S(GetDC) S(GetClassLongA) S(BeginPaint) S(GetWindowThreadProcessId) S(ClientToScreen) S(ScreenToClient) S(GetCursorPos) S(GetWindowRect) S(GetClientRect) S(GetAsyncKeyState)
     S(GetKeyboardLayout) S(ToUnicodeEx) S(TrackMouseEvent) S(SetWindowPos) S(SetWindowLongA)
     S(EnumDisplaySettingsA) S(EnumDisplayMonitors)
 #undef S

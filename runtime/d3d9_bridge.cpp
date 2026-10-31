@@ -139,11 +139,13 @@ uint32_t d3d9_wrap(void *host, int iface) {
 }
 
 // ---------------------------------------------------------------- structs
-extern "C" int touch_available(void);
-extern "C" void touch_draw(void *d);
-extern "C" void touch_set_device(void *d);
-extern "C" void touch_draw_frame(void);
-extern "C" void touch_notify_reset(void);
+/* The D3D overlay is gone: the touch HUD now lives in the Android activity
+ * (Java), drawn as a real View and fed through the hud_jni ring. The bridge
+ * keeps two duties: sync the guest's client rect to the REAL backbuffer
+ * (a real Windows machine always has client == backbuffer; reporting the
+ * host window here while the game renders at its own resolution put every
+ * menu mouse coordinate off by the ratio — the Career/Training bug), and
+ * keep phones presenting with vsync. */
 
 static void pp_from_guest(uint32_t g, D3DPRESENT_PARAMETERS *pp) {
     memset(pp, 0, sizeof *pp);
@@ -161,13 +163,11 @@ static void pp_from_guest(uint32_t g, D3DPRESENT_PARAMETERS *pp) {
     pp->Flags = M32(g + 44);
     pp->FullScreen_RefreshRateInHz = 0;
     pp->PresentationInterval = M32(g + 52);
-    // The VSync menu item controls the touch overlay instead (touch.cpp).
     // Phones always present with vsync; desktop test runs never wait for it.
-    if (touch_available())
 #ifdef __ANDROID__
-        pp->PresentationInterval = D3DPRESENT_INTERVAL_ONE;
+    pp->PresentationInterval = D3DPRESENT_INTERVAL_ONE;
 #else
-        pp->PresentationInterval = D3DPRESENT_INTERVAL_IMMEDIATE;
+    pp->PresentationInterval = D3DPRESENT_INTERVAL_IMMEDIATE;
 #endif
     if (pp->BackBufferFormat == D3DFMT_UNKNOWN) pp->BackBufferFormat = D3DFMT_X8R8G8B8;
 }
@@ -310,6 +310,13 @@ void B_IDirect3D9_CreateDevice(CPU *c) {
     if (SUCCEEDED(hr) && dev) {
         g_bridge_dev = dev;
         g_bridge_dev->AddRef();
+        /* Client == backbuffer: the game picked its own render resolution
+         * (desktop-derived, e.g. 1142x540 on a 2285x1080 panel) but the
+         * user32 shims still reported the host window — every menu mouse
+         * coordinate landed at ratio off what the GUI compares against.
+         * A real Windows machine always has GetClientRect == backbuffer. */
+        if (pp.BackBufferWidth && pp.BackBufferHeight)
+            user32_set_screen((int)pp.BackBufferWidth, (int)pp.BackBufferHeight);
     }
     if (ARG(6)) M32(ARG(6)) = SUCCEEDED(hr) ? d3d9_wrap(dev, IFACE_IDirect3DDevice9) : 0;
     LOG("CreateDevice -> %08x", (uint32_t)hr);
@@ -337,12 +344,6 @@ void B_IDirect3DDevice9_CreateAdditionalSwapChain(CPU *c) {
     HRESULT hr = d->CreateAdditionalSwapChain(&pp, &sc);
     pp_to_guest(&pp, ARG(1));
     if (ARG(2)) M32(ARG(2)) = d3d9_wrap(sc, IFACE_IDirect3DSwapChain9);
-    if (SUCCEEDED(hr)) {
-        /* SWAT 4 presents its menu/movie frames through this swapchain; the
-         * overlay must draw there too or it freezes after the first device
-         * Present. Capture the device for touch_draw_frame(). */
-        touch_set_device(d);
-    }
     RET(hr, 3);
 }
 
@@ -352,7 +353,10 @@ void B_IDirect3DDevice9_Reset(CPU *c) {
     pp_from_guest(ARG(1), &pp);
     HRESULT hr = d->Reset(&pp);
     pp_to_guest(&pp, ARG(1));
-    touch_notify_reset(); // overlay state died with the device (font atlas survives)
+    /* Client == backbuffer, again: an in-game resolution change must keep
+     * the menu mouse coordinates 1:1 with what the game renders. */
+    if (SUCCEEDED(hr) && pp.BackBufferWidth && pp.BackBufferHeight)
+        user32_set_screen((int)pp.BackBufferWidth, (int)pp.BackBufferHeight);
     LOG("Reset %ux%u -> %08x", pp.BackBufferWidth, pp.BackBufferHeight, (uint32_t)hr);
     RET(hr, 2);
 }
@@ -410,7 +414,6 @@ void B_IDirect3DDevice9_Present(CPU *c) {
     g_frame++;
     g_d3d_trace = g_frame >= g_trace_from && g_frame <= g_trace_to;
     if (g_d3d_trace) fprintf(stderr, "D3D %d Present\n", g_frame);
-    touch_draw(d);
     HRESULT hr = d->Present((const RECT *)GPTR(ARG(1)), (const RECT *)GPTR(ARG(2)), nullptr,
                             (const RGNDATA *)GPTR(ARG(4)));
     platform_present_hook();
@@ -426,7 +429,6 @@ void B_IDirect3DDevice9_GetNPatchMode(CPU *c) {
 
 void B_IDirect3DSwapChain9_Present(CPU *c) {
     auto *s = (IDirect3DSwapChain9 *)com_host(ARG(0));
-    touch_draw_frame(); // overlay lives on this path too (menus/movies)
     HRESULT hr = s->Present((const RECT *)GPTR(ARG(1)), (const RECT *)GPTR(ARG(2)), nullptr,
                             (const RGNDATA *)GPTR(ARG(4)), ARG(5));
     platform_present_hook();

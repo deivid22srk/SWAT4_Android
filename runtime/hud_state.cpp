@@ -227,3 +227,117 @@ void hud_state_reset_for_tests(void) {
 }
 
 void hud_set_scan_interval(uint32_t ms) { s_interval = ms; }
+
+/* ------------------------------------------------------------------ */
+/* Selftest: builds a synthetic guest image (MAP_NORESERVE, so the 4 GiB
+ * flat space stays uncommitted until touched) and walks the real scan.
+ * Built only by scripts/test_hud.sh with -DHUD_STATE_SELFTEST. */
+#ifdef HUD_STATE_SELFTEST
+
+#include <stdio.h>
+#include <sys/mman.h>
+
+static int failures;
+#define CHECK(x) do { \
+    if (!(x)) { printf("FAIL %s:%d: %s\n", __FILE__, __LINE__, #x); failures++; } \
+} while (0)
+
+int main(void) {
+    /* S1: no guest memory -> UNKNOWN (never guess) */
+    hud_state_reset_for_tests();
+    CHECK(hud_game_ctx() == HUD_CTX_UNKNOWN);
+    hud_game_tick(0);
+    CHECK(hud_game_ctx() == HUD_CTX_UNKNOWN);
+
+    void *img = mmap(NULL, 0x40000000u, PROT_READ | PROT_WRITE,
+                     MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+    CHECK(img != MAP_FAILED);
+    if (img == MAP_FAILED) return 1;
+    uint8_t *m = (uint8_t *)img;
+    auto w32 = [&](uint32_t a, uint32_t v) { memcpy(m + a, &v, 4); };
+
+    const uint32_t GOBJ = 0x01000000u + 0x294354u;   /* Core.dll GObjObjects  */
+    const uint32_t CLS  = 0x03200000u + 0xab848u;    /* ASwatPlayer::StaticClass slot */
+    const uint32_t CLSD = 0x03200000u + 0xa6408u;    /* ASwatDoor::StaticClass slot   */
+    const uint32_t NAMES = 0x01000000u + 0x28c2c0u;
+    const uint32_t CLSOBJ = 0x2AAA1000, CLSDOBJ = 0x2AAA2000;
+    const uint32_t PAWN = 0x2BBB2000, DOOR1 = 0x2BBB3000, DOOR2 = 0x2BBB4000;
+    const uint32_t DATA = 0x2CCC3000, LVL = 0x2DDD4000, PKG = 0x2DDD5000;
+    const uint32_t FENTRY = 0x2EEE6000;              /* FNameEntry for "Entry" */
+
+    /* S2: class slot not registered yet -> UNKNOWN */
+    hud_set_guest_mem(m);
+    hud_set_scan_interval(1);
+    hud_game_tick(0);
+    CHECK(hud_game_ctx() == HUD_CTX_UNKNOWN);
+
+    /* engine reality: UClass objects are heap objects; the array holds a
+     * pawn and two doors */
+    w32(CLS, CLSOBJ);
+    w32(CLSD, CLSDOBJ);
+    w32(CLSOBJ + 0x24, CLSOBJ);          /* a UClass points to itself */
+    w32(CLSDOBJ + 0x24, CLSDOBJ);
+    w32(PAWN + 0x24, CLSOBJ);
+    w32(DOOR1 + 0x24, CLSDOBJ);
+    w32(DOOR2 + 0x24, CLSDOBJ);
+    const float pawn_loc[3] = {100.0f, 200.0f, 50.0f};
+    const float door1_loc[3] = {110.0f, 210.0f, 50.0f};  /* ~14 units away */
+    const float door2_loc[3] = {90000.0f, 0.0f, 0.0f};   /* far */
+    memcpy(m + PAWN + 0x174, pawn_loc, 12);
+    memcpy(m + DOOR1 + 0x174, door1_loc, 12);
+    memcpy(m + DOOR2 + 0x174, door2_loc, 12);
+    w32(GOBJ, DATA);
+    w32(GOBJ + 4, 3);
+    w32(DATA + 0, PAWN);
+    w32(DATA + 4, DOOR1);
+    w32(DATA + 8, DOOR2);
+
+    /* pawn NOT in Entry (outer chain points to a package named something
+     * else; the FName entry is not "Entry") -> MISSION */
+    w32(PAWN + 0x18, LVL);
+    w32(LVL + 0x18, PKG);
+    w32(PKG + 0x20, 7);                  /* name index 7 */
+    w32(NAMES + 7 * 4, FENTRY);
+    memcpy(m + FENTRY + 0xC, "SwatGame", 9);
+    hud_game_tick(2);
+    CHECK(hud_game_ctx() == HUD_CTX_MISSION);
+    CHECK(hud_pawn() == PAWN);
+    CHECK(hud_door_count() == 2);
+    float d2 = -1;
+    CHECK(hud_door_near(128.0f, &d2) == 1);
+    CHECK(d2 >= 0 && d2 < 128.0f * 128.0f);
+
+    /* S3: the same pawn living in the boot "Entry" package is the menu
+     * backdrop: MENU, pawn dropped, entry flag set */
+    w32(NAMES + 7 * 4, FENTRY);
+    memcpy(m + FENTRY + 0xC, "Entry\0\0", 8);
+    hud_game_tick(4);
+    CHECK(hud_game_ctx() == HUD_CTX_MENU);
+    CHECK(hud_pawn() == 0);
+    CHECK(hud_pawn_entry() == 1);
+
+    /* S4: fast death check — the pawn's class stops matching (destroyed
+     * object reuse): dropped on the next tick without waiting the scan.
+     * The recycled object now matches the door class, so the rescan sees
+     * live objects but no pawn: MENU (with the recycled one among doors). */
+    memcpy(m + FENTRY + 0xC, "SwatGame", 9);
+    hud_game_tick(6);
+    CHECK(hud_game_ctx() == HUD_CTX_MISSION);
+    w32(PAWN + 0x24, CLSDOBJ);           /* turned into a door?! object died */
+    hud_game_tick(7);
+    CHECK(hud_game_ctx() == HUD_CTX_MENU);
+    CHECK(hud_pawn() == 0);
+    CHECK(hud_door_count() == 3);
+
+    /* S5: array payload out of the heap -> UNKNOWN, no crash */
+    w32(PAWN + 0x24, CLSOBJ);
+    w32(GOBJ, 0x7FFFFFFF);               /* not a heap pointer */
+    hud_game_tick(8);
+    CHECK(hud_game_ctx() == HUD_CTX_UNKNOWN);
+
+    munmap(img, 0x40000000u);
+    printf(failures ? "hud_state selftest: %d FAILURES\n" : "hud_state selftest: ok\n",
+           failures);
+    return failures ? 1 : 0;
+}
+#endif /* HUD_STATE_SELFTEST */
