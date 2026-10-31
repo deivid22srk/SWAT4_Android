@@ -19,6 +19,20 @@ static volatile uint32_t s_btn;           /* bit0 left, bit1 right, bit2 middle 
 static uint8_t s_keys[256];               /* DIK -> 0/1 */
 static volatile uint32_t s_edges;         /* key transitions (diagnostics) */
 
+/* ---- menu mouse state (see vinput.h; used by the button path too) ---- */
+#define WM_MOUSEMOVE    0x0200u
+#define WM_LBUTTONDOWN  0x0201u
+#define WM_LBUTTONUP    0x0202u
+#define MK_LBUTTON      0x0001u
+
+static int s_cur_x, s_cur_y = -1;   /* last cursor position (y=-1: unset) */
+static int s_cur_left;              /* synthesized left button state */
+
+static void cur_post(uint32_t msg, uint32_t wp) {
+    user32_mouse_msg(msg, wp, ((uint32_t)s_cur_y << 16) | ((uint32_t)s_cur_x & 0xFFFF));
+}
+static void menu_click_edge(int down); /* shared left-button edge (below) */
+
 void vinput_mouse_delta(int dx, int dy) {
     s_mx += dx;
     s_my += dy;
@@ -34,6 +48,29 @@ void vinput_mouse_take(int *dx, int *dy) {
 void vinput_mouse_button(int btn0a2, int down) {
     if (btn0a2 < 0 || btn0a2 > 2) return;
     uint32_t bit = 1u << btn0a2;
+    /* Menus/movies/boot (not a mission): a real mouse also delivers the
+     * WM at the cursor, and the GUI listens ONLY to messages — a tap that
+     * only set the DirectInput bit was invisible there (field video
+     * screen-20261031-183211: every HUD button dead at the main menu).
+     * Button 0 shares the menu-button edge state so the WM pair stays
+     * consistent with EV_MENUCLICK; buttons 1/2 post their own WM pair.
+     * The WM is only posted once the cursor has a real position
+     * (s_cur_y >= 0): a click without a placed cursor would land at 0,0
+     * or pack 0xFFFF. Missions stay DI-only: the WM click would
+     * double-fire IK_LeftMouse next to the polled device state. */
+    extern int hud_game_ctx(void);
+    if (hud_game_ctx() != 2 /* HUD_CTX_MISSION */ && s_cur_y >= 0) {
+        static const uint32_t down_msg[3] = {0x201, 0x204, 0x207}; /* L/R/M */
+        static const uint32_t up_msg[3]   = {0x202, 0x205, 0x208};
+        static const uint32_t mk_flag[3]  = {0x0001, 0x0002, 0x0010};
+        if (btn0a2 == 0) {
+            menu_click_edge(down);
+            return;
+        }
+        if (down) s_btn |= bit; else s_btn &= ~bit;
+        cur_post(down ? down_msg[btn0a2] : up_msg[btn0a2], down ? mk_flag[btn0a2] : 0);
+        return;
+    }
     if (down) s_btn |= bit;
     else s_btn &= ~bit;
 }
@@ -108,17 +145,6 @@ int vinput_active(void) {
 }
 
 /* ---- menu mouse: see vinput.h ---- */
-#define WM_MOUSEMOVE    0x0200u
-#define WM_LBUTTONDOWN  0x0201u
-#define WM_LBUTTONUP    0x0202u
-#define MK_LBUTTON      0x0001u
-
-static int s_cur_x, s_cur_y = -1;   /* last cursor position (y=-1: unset) */
-static int s_cur_left;              /* synthesized left button state */
-
-static void cur_post(uint32_t msg, uint32_t wp) {
-    user32_mouse_msg(msg, wp, ((uint32_t)s_cur_y << 16) | ((uint32_t)s_cur_x & 0xFFFF));
-}
 
 void vinput_menu_move(int x, int y) {
     if (x == s_cur_x && y == s_cur_y) return; /* dedupe: fingers stream at ~120 Hz */
@@ -128,13 +154,18 @@ void vinput_menu_move(int x, int y) {
 }
 
 void vinput_menu_button(int down) {
+    menu_click_edge(down);
+}
+
+/* Single source of the left-button edge shared by the free-finger menu
+ * mouse (EV_MENUCLICK) and button 0 taps in menu-like contexts: real-edge
+ * dedupe, the DirectInput mirror (the movie skip and some menu paths poll
+ * the device instead of the queue) and the WM pair at the cursor. */
+static void menu_click_edge(int down) {
     down = down ? 1 : 0;
     if (down == s_cur_left) return; /* WM expects real edges only */
     s_cur_left = down;
-    /* Mirror into the DirectInput button state: the movie skip and some
-     * menu paths poll the device instead of the message queue. Safe while
-     * the HUD is hidden — nothing else drives button 0 there. */
-    vinput_mouse_button(0, down);
+    if (down) s_btn |= 1u; else s_btn &= ~1u; /* DI mirror */
     cur_post(down ? WM_LBUTTONDOWN : WM_LBUTTONUP, down ? MK_LBUTTON : 0);
 }
 

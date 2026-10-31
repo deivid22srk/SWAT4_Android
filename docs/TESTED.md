@@ -1191,3 +1191,70 @@ nesta rodada; registrar caso um dia apareça como artefato visual.
 * Menu volta em 1142x540 sem abort; cliques e stick funcionam;
 * Se algum reset falhar de verdade, o jogo recebe um D3DERR tratável
   (retry do SetRes) em vez de fechar.
+
+## 2026-11-01 — HUD morto no menu: foco do guest + fila W + cliques WM dos botões
+
+Evidência: vídeo `screen-20261031-183211.mp4` (release tag `Log`) — menu
+principal visível, HUD desenhado, cursor do jogo **congelado em (0,0)**,
+toques em todos os botões sem efeito. O cursor em (0,0) é exatamente o
+estado inicial do cursor virtual (`vinput`), provando que NENHUM input de
+menu chegou ao guest. Quatro defeitos independentes, todos corrigidos:
+
+### 1. Foco: o guest acreditava estar INATIVO para sempre
+
+`GetFocus` devolvia 0 e `GetForegroundWindow`/`GetActiveWindow` devolviam
+um HWND falso (0x00010010) que **nunca coincide** com as janelas criadas
+pelo jogo (00010001/00010005/00010009/0001000d/00010011 no log de campo).
+UE2 decide aceitar mouse/teclado comparando o foco com a própria janela;
+com o teste sempre falso, a GUI ignorava tudo. Além disso nenhum
+WM_ACTIVATE/WM_SETFOCUS era entregue (Win32 real envia os dois após
+WM_CREATE). Agora: os três retornam a janela principal
+(`user32_main_hwnd`) e o par de ativação é entregue nas versões A e W de
+`CreateWindowEx`.
+
+### 2. A fila de mensagens W era um poço sem fundo
+
+A camada de janela do SWAT4 é a build **W** (só `CreateWindowExW` no log).
+O pump do guest chama o par W — e `PeekMessageW` devolvia "sem mensagens"
+para sempre, enquanto `PeekMessageA` (com a fila) nunca era chamado. Todo
+WM enfileirado (setas do stick, ESC, cliques) jamais despachava. Agora A
+e W drenam a MESMA fila; `GetMessageA/W` retornam -1 (0 seria WM_QUIT e
+poderia encerrar o loop do jogo).
+
+### 3. Botões do HUD não entregavam clique de mouse de verdade
+
+FOGO/CMD/USAR só ligavam o bit do DirectInput — a GUI não lê DI, lê
+mensagens WM na posição do cursor. Agora, fora de missão (menu/vídeo/
+boot), MBTN entrega o par WM (0x201/0x202, 0x204/0x205, 0x207/0x208) na
+posição atual do cursor via `menu_click_edge` (fonte única de borda,
+espelha DI também); em missão continua só DI (o WM dispararia
+IK_LeftMouse duas vezes). Toque livre (R_MENU) segue como mouse do menu
+(WM_MOUSEMOVE + MENUCLICK). Cursor nunca coloca WM antes da 1ª posição
+real (y>=0).
+
+### 4. Import sem shim no caminho do mouse = crash latente
+
+`GetCapture` e `GetCursor` não tinham shim: chamá-los é `rt_fatal`
+(imediato) — e o caminho de captura do mouse é justamente o próximo a ser
+executado quando o menu começa a responder. Shims adicionados
+(GetCapture→0 = sem captura, GetCursor→handle fake, GetMessagePos→cursor
+virtual empacotado).
+
+### Diagnóstico de campo (próximo log responde onde param)
+
+* `msg pump: first WM_MOUSEMOVE/WM_*BUTTONDOWN/WM_KEYDOWN delivered` —
+  primeira entrega de cada classe (prova fila→pump→WndProc);
+* `hud: N applied, M dropped, ctx C, wm X mm/Y click/Z key dispatched` —
+  a cada 300 frames, com contadores da bomba;
+* `hud: ctx A -> B (gen G pawn P doors D entry E)` — virada de contexto
+  com a evidência do scan (o rampa VA 0x40000000-0x60000000 do commit
+  925d813 agora alimenta o `everMenu` do Java).
+
+### Validação local
+
+* `sh scripts/test_hud.sh` — tudo ok (vinput/user32/swat4_shims/
+  platform_sdl compilam; selftests do anel e do scan passam);
+* novo teste de comportamento `scripts/behave/vinput_behav.c`: toques de
+  botão em menu entregam WM_MOUSEMOVE/LBUTTONDOWN/LBUTTONUP + espelho DI,
+  dedupe de borda, contexto de missão não gera WM, cursor não colocado não
+  gera WM, EV_MENUCLICK e botão 0 compartilham a mesma borda.

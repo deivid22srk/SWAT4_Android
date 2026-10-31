@@ -129,6 +129,13 @@ SHIM(CreateWindowExA) {
             if (!r) { gfree(cs); create_depth--; RET(0, 12); }
             a[1] = 0x1; /* WM_CREATE */
             rt_invoke(c, g_wndproc, 4, a);
+            /* Real Windows follows WM_CREATE with activation: without the
+             * WM_ACTIVATE+WM_SETFOCUS pair the guest's viewport believes it
+             * is inactive forever and ignores mouse/keyboard (dead menus). */
+            a[1] = 0x6;  a[2] = 1; a[3] = 0; /* WM_ACTIVATE, WA_ACTIVE */
+            rt_invoke(c, g_wndproc, 4, a);
+            a[1] = 0x7;  a[2] = 0; a[3] = 0; /* WM_SETFOCUS */
+            rt_invoke(c, g_wndproc, 4, a);
             gfree(cs);
             create_depth--;
         }
@@ -147,9 +154,29 @@ SHIM(ShowWindow) { RET(1, 2); }
 SHIM(UpdateWindow) { RET(1, 1); }
 SHIM(MoveWindow) { RET(1, 6); }
 SHIM(SetForegroundWindow) { RET(1, 1); }
-SHIM(GetForegroundWindow) { RET(FAKE_HWND, 0); }
+/* The game's own window once it exists (FAKE_HWND fallback before that).
+ * UE2 compares these against its own HWND to decide the app has focus; a
+ * constant fake handle that never matches meant the guest believed it was
+ * INACTIVE forever and the GUI ignored every mouse/key we fed it. */
+SHIM(GetForegroundWindow) { RET(user32_main_hwnd(), 0); }
+SHIM(GetActiveWindow) { RET(user32_main_hwnd(), 0); }
 SHIM(GetDesktopWindow) { RET(0x00010000u, 0); } /* desktop pseudo-HWND */
 SHIM(IsIconic) { RET(0, 1); }
+/* Mouse capture pairs (swat4_shims has SetCapture/ReleaseCapture): UE2's
+ * viewport activation and the UWindow mouse path call GetCapture to decide
+ * whether a drag belongs to the window. Unshimmed = rt_fatal on first call
+ * — exactly when the menu mouse starts working. No capture is the truth. */
+SHIM(GetCapture) { RET(0, 0); }
+SHIM(GetCursor) { RET(0x20003u, 0); } /* fake HCURSOR, same family as icons */
+/* GetMessagePos: cursor position packed like the lParam of the last mouse
+ * message (the UWindow framework reads this instead of the message's own
+ * lParam in some paths). Backed by the vinput virtual cursor. */
+SHIM(GetMessagePos) {
+    extern void vinput_cursor(int *x, int *y);
+    int x, y;
+    vinput_cursor(&x, &y);
+    RET(((uint32_t)(y & 0xFFFF) << 16) | ((uint32_t)x & 0xFFFF), 0);
+}
 SHIM(GetWindowLongA) { RET((uint32_t)user32_win_getlong(ARG(0), (int32_t)ARG(1)), 2); }
 SHIM(AdjustWindowRect) { RET(1, 3); }
 SHIM(GetSystemMetrics) {
@@ -194,6 +221,33 @@ static QMsg g_q[256];
 static unsigned g_qhead, g_qtail;
 static pthread_mutex_t g_qlock = PTHREAD_MUTEX_INITIALIZER;
 
+/* Dispatch observability: the field logs must answer WHERE menu input dies
+ * (posted? pumped? delivered?). Counted on the game thread, printed by the
+ * present hook every 300 frames and on first delivery of each class. */
+static uint32_t g_wm_mm, g_wm_click, g_wm_key;      /* dispatched counts */
+static uint8_t g_wm_first[3];                       /* one-shot LOG flags */
+void user32_wm_stats(uint32_t *mm, uint32_t *click, uint32_t *key) {
+    if (mm) *mm = g_wm_mm;
+    if (click) *click = g_wm_click;
+    if (key) *key = g_wm_key;
+}
+
+static void wm_note(uint32_t msg, uint32_t lp) {
+    const char *nm = msg == 0x200 ? "WM_MOUSEMOVE" : msg == 0x201 || msg == 0x204 || msg == 0x207
+        ? "WM_*BUTTONDOWN" : msg == 0x202 || msg == 0x205 || msg == 0x208
+        ? "WM_*BUTTONUP" : msg == 0x100 ? "WM_KEYDOWN" : msg == 0x101 ? "WM_KEYUP" : NULL;
+    if (!nm) return;
+    unsigned slot = msg == 0x200 ? 0 : (msg == 0x100 || msg == 0x101) ? 2 : 1;
+    if (slot == 0) g_wm_mm++;
+    else if (slot == 1) g_wm_click++;
+    else g_wm_key++;
+    if (!g_wm_first[slot]) {
+        g_wm_first[slot] = 1;
+        LOG("msg pump: first %s delivered to the guest (x=%d y=%d)",
+            nm, (int)(lp & 0xFFFF), (int)(lp >> 16));
+    }
+}
+
 static void post_msg(uint32_t msg, uint32_t wp, uint32_t lp) {
     pthread_mutex_lock(&g_qlock);
     if (g_qtail - g_qhead < 256) g_q[g_qtail++ % 256] = (QMsg){msg, wp, lp};
@@ -237,8 +291,13 @@ void user32_key_direct(uint32_t vk, uint32_t sc, int down) {
     post_msg(msg, vk, lp);
 }
 
-SHIM(PeekMessageA) {
-    uint32_t m = ARG(0), remove = ARG(4) & 1;
+/* Shared pump: both the A and W entry points MUST drain the same queue.
+ * SWAT4's window layer is the W build (CreateWindowExW/RegisterClassExW in
+ * the field log) and its pump turned out to call the W pair — the old
+ * PeekMessageW returned "no messages" forever, so every queued key/click
+ * was a black hole and the menus never saw input. */
+static void peek_msg(CPU *c) {
+    uint32_t m = ARG(0);
     if (g_quit == 1) {
         /* deliver WM_QUIT once */
         memset(MEM + m, 0, 28);
@@ -251,7 +310,7 @@ SHIM(PeekMessageA) {
     pthread_mutex_lock(&g_qlock);
     if (g_qhead != g_qtail) {
         q = g_q[g_qhead % 256];
-        if (remove) g_qhead++;
+        if (ARG(4) & 1) g_qhead++;
         got = 1;
     }
     pthread_mutex_unlock(&g_qlock);
@@ -262,8 +321,11 @@ SHIM(PeekMessageA) {
     M32(m + 8) = q.wp;
     M32(m + 12) = q.lp;
     M32(m + 16) = SDL_GetTicks();
+    wm_note(q.msg, q.lp);
     RET(1, 5);
 }
+SHIM(PeekMessageA) { peek_msg(c); }
+SHIM(PeekMessageW) { peek_msg(c); }
 SHIM(TranslateMessage) {
     uint32_t m = ARG(0), vk = M32(m + 8);
     if (M32(m + 4) == 0x100) {
@@ -338,7 +400,6 @@ SHIM(GetObjectA) { RET(0x0u, 3); }
 
 /* Window/GDI calls made by binkw32; movies are drawn through D3D, not GDI. */
 SHIM(GetTopWindow) { RET(0, 1); }
-SHIM(GetActiveWindow) { RET(FAKE_HWND, 0); }
 SHIM(GetWindow) { RET(0, 2); }
 SHIM(UnregisterClassA) { RET(1, 2); }
 SHIM(EndPaint) { RET(1, 2); }
@@ -468,11 +529,12 @@ SHIM(EnumDisplayMonitors) {
 static const ShimDef defs[] = {
 #define S(n) {"USER32.dll", #n, shim_##n},
     S(RegisterClassExA) S(CreateWindowExA) S(DestroyWindow) S(ShowWindow) S(UpdateWindow) S(MoveWindow)
-    S(SetForegroundWindow) S(GetForegroundWindow) S(GetDesktopWindow) S(IsIconic) S(GetWindowLongA) S(AdjustWindowRect)
+    S(SetForegroundWindow) S(GetForegroundWindow) S(GetActiveWindow) S(GetDesktopWindow) S(IsIconic) S(GetWindowLongA) S(AdjustWindowRect)
     S(GetSystemMetrics) S(SystemParametersInfoA) S(LoadIconA) S(LoadCursorA) S(SetCursor) S(SetCursorPos)
-    S(ShowCursor) S(LoadKeyboardLayoutA) S(MapVirtualKeyExA) S(PeekMessageA) S(TranslateMessage)
+    S(GetCapture) S(GetCursor) S(GetMessagePos)
+    S(ShowCursor) S(LoadKeyboardLayoutA) S(MapVirtualKeyExA) S(PeekMessageA) S(PeekMessageW) S(TranslateMessage)
     S(DispatchMessageA) S(SendMessageA) S(PostQuitMessage) S(DefWindowProcA) S(MessageBoxA) S(MessageBoxW)
-    S(GetTopWindow) S(GetActiveWindow) S(GetWindow) S(UnregisterClassA) S(EndPaint) S(ReleaseDC) S(IsWindowVisible) S(ChangeDisplaySettingsA) S(RegisterClassA) S(GetDC) S(GetClassLongA) S(BeginPaint) S(GetWindowThreadProcessId) S(ClientToScreen) S(ScreenToClient) S(GetCursorPos) S(GetWindowRect) S(GetClientRect) S(GetAsyncKeyState)
+    S(GetTopWindow) S(GetWindow) S(UnregisterClassA) S(EndPaint) S(ReleaseDC) S(IsWindowVisible) S(ChangeDisplaySettingsA) S(RegisterClassA) S(GetDC) S(GetClassLongA) S(BeginPaint) S(GetWindowThreadProcessId) S(ClientToScreen) S(ScreenToClient) S(GetCursorPos) S(GetWindowRect) S(GetClientRect) S(GetAsyncKeyState)
     S(GetKeyboardLayout) S(ToUnicodeEx) S(TrackMouseEvent) S(SetWindowPos) S(SetWindowLongA)
     S(EnumDisplaySettingsA) S(EnumDisplayMonitors)
 #undef S

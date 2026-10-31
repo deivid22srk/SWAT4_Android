@@ -782,6 +782,14 @@ SHIM(CreateWindowExW) {
         if (!r) { gfree(cs); create_depth--; RET(0, 12); }
         a[1] = 0x1; /* WM_CREATE */
         rt_invoke(c, wndproc, 4, a);
+        /* Real Windows follows WM_CREATE with activation (WM_ACTIVATE
+         * WA_ACTIVE + WM_SETFOCUS). Without it the guest viewport believes
+         * it is inactive forever and the GUI ignores mouse/keyboard — the
+         * dead touch HUD of field video screen-20261031-183211. */
+        a[1] = 0x6; a[2] = 1; a[3] = 0; /* WM_ACTIVATE, WA_ACTIVE */
+        rt_invoke(c, wndproc, 4, a);
+        a[1] = 0x7; a[2] = 0; a[3] = 0; /* WM_SETFOCUS */
+        rt_invoke(c, wndproc, 4, a);
         gfree(cs);
         create_depth--;
     }
@@ -795,8 +803,13 @@ SHIM(SetCapture) { RET(0, 1); }
 SHIM(ClipCursor) { RET(1, 1); }
 SHIM(MessageBeep) { RET(1, 1); }
 SHIM(SetFocus) { RET(0, 1); }
-SHIM(GetFocus) { RET(0, 0); }
-SHIM(PeekMessageW) { RET(0, 5); }
+/* The guest checks focus against its OWN window handle; a constant NULL
+ * made every UE2 focus test fail and the GUI drop all input. Return the
+ * same handle GetForegroundWindow/GetActiveWindow report. */
+SHIM(GetFocus) { RET(user32_main_hwnd(), 0); }
+/* PeekMessageW lives in user32.c (same queue as the A pair, dispatch
+ * counters). GetMessageA: real Windows BLOCKS; returning 0 would read as
+ * WM_QUIT and could end the game loop — the shim below returns -1. */
 SHIM(DispatchMessageW) {
     uint32_t m = ARG(0);
     uint32_t r = 0;
@@ -811,7 +824,8 @@ SHIM(PostMessageW) { RET(1, 4); }
 SHIM(PostMessageA) { RET(1, 4); }
 SHIM(PostThreadMessageA) { RET(1, 4); }
 SHIM(SendMessageW) { RET(0, 4); }
-SHIM(GetMessageA) { RET(0, 4); }
+SHIM(GetMessageA) { RET((uint32_t)-1, 4); } /* -1 = no message; 0 would be WM_QUIT */
+SHIM(GetMessageW) { RET((uint32_t)-1, 4); }
 SHIM(GetMessageTime) { RET(0, 0); }
 SHIM(keybd_event) { RET(0, 4); }
 SHIM(SystemParametersInfoW) { RET(1, 4); }
@@ -1257,13 +1271,13 @@ static const ShimDef defs[] = {
     {"USER32.dll", "MessageBeep", shim_MessageBeep},
     {"USER32.dll", "SetFocus", shim_SetFocus},
     {"USER32.dll", "GetFocus", shim_GetFocus},
-    {"USER32.dll", "PeekMessageW", shim_PeekMessageW},
     {"USER32.dll", "DispatchMessageW", shim_DispatchMessageW},
     {"USER32.dll", "PostMessageW", shim_PostMessageW},
     {"USER32.dll", "PostMessageA", shim_PostMessageA},
     {"USER32.dll", "PostThreadMessageA", shim_PostThreadMessageA},
     {"USER32.dll", "SendMessageW", shim_SendMessageW},
     {"USER32.dll", "GetMessageA", shim_GetMessageA},
+    {"USER32.dll", "GetMessageW", shim_GetMessageW},
     {"USER32.dll", "GetMessageTime", shim_GetMessageTime},
     {"USER32.dll", "keybd_event", shim_keybd_event},
     {"USER32.dll", "SystemParametersInfoW", shim_SystemParametersInfoW},

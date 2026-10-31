@@ -366,18 +366,36 @@ void platform_present_hook(void) {
     g_frames++;
     if (g_frames % 300 == 0) {
         LOG("frame %d", g_frames);
-        /* field evidence that HUD intents flow (ring applied/dropped and
-         * the live context), only when the counters moved since the last
-         * report: one line per 300 frames at most */
+        /* field evidence that HUD intents flow (ring applied/dropped, the
+         * live context and the guest message pump): one line per 300
+         * frames at most, plus an immediate line whenever the context or
+         * the first WM of each class happens — the dead-menu round needs
+         * the field log to show WHERE touch input stops (ring, queue,
+         * pump, GUI). */
         extern uint32_t hud_applied_events(void);
         extern uint32_t hud_dropped_events(void);
         extern int hud_game_ctx(void);
+        extern void user32_wm_stats(uint32_t *mm, uint32_t *click, uint32_t *key);
         static uint32_t la = 0xFFFFFFFFu, ld;
+        static int lctx = -1;
         uint32_t a = hud_applied_events(), d = hud_dropped_events();
-        if (a != la || d != ld) {
-            LOG("hud: %u applied, %u dropped, ctx %d", a, d, hud_game_ctx());
-            la = a;
-            ld = d;
+        uint32_t mm, cl, ky;
+        user32_wm_stats(&mm, &cl, &ky);
+        static uint32_t lmm, lcl, lky;
+        if (a != la || d != ld || mm != lmm || cl != lcl || ky != lky) {
+            LOG("hud: %u applied, %u dropped, ctx %d, wm %u mm/%u click/%u key dispatched",
+                a, d, hud_game_ctx(), mm, cl, ky);
+            la = a; ld = d; lmm = mm; lcl = cl; lky = ky;
+        }
+        if (hud_game_ctx() != lctx) {
+            extern uint32_t hud_scan_gen(void);
+            extern uint32_t hud_pawn(void);
+            extern int hud_door_count(void);
+            extern int hud_pawn_entry(void);
+            LOG("hud: ctx %d -> %d (gen %u pawn %08x doors %d entry %d)",
+                lctx, hud_game_ctx(), hud_scan_gen(), hud_pawn(),
+                hud_door_count(), hud_pawn_entry());
+            lctx = hud_game_ctx();
         }
     }
     if (g_frames % 60 == 0) fflush(stderr);  /* fully buffered log: periodic flush */
