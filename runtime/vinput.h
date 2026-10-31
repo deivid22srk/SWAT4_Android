@@ -40,8 +40,15 @@ const uint8_t *vinput_keys(void);
 
 /* Like vinput_key, but also posts WM_KEYDOWN/WM_KEYUP (dik -> VK table
  * below). Used for discrete actions (use, reload, ESC, slot numbers, ...)
- * that the game may handle through its window procedure. */
+ * that the game may handle through its window procedure. While a Bink
+ * movie is open (hud_movie_playing) the WM goes straight into the guest
+ * WndProc instead of the queue: the movie loop never pumps the queue. */
 void vinput_key_tap(uint8_t dik, int down);
+
+/* Implemented in kernel32.c: number of open .bik files > 0. The startup
+ * videos are the only phase where the guest pumps no messages and no GUI
+ * exists; the HUD turns taps into the skip key exactly then. */
+int hud_movie_playing(void);
 
 /* Diagnostics: number of key state transitions seen (0->1 or 1->0). The
  * overlay selftest uses it to assert that repeated stick motion inside the

@@ -1128,3 +1128,66 @@ ESC no vídeo deve aumentar `N` na linha seguinte.
 * Missão: stick/botões/look respondem de imediato;
 * Fechar o jogo (voltar/sair) sem abort — processo encerra limpo;
 * log.txt: linhas `hud: N applied…` crescendo conforme o HUD é usado.
+
+## 2026-11-01 — iutlog (build #44): app fecha no SetRes após os vídeos + toque para pular vídeos
+
+Log do aparelho (iutlog.zip, build dded5c1): os três vídeos de abertura
+(SierraLogo.bik, Nvidia.bik, Swat4.bik) tocaram por ~115 s e, ao terminar o
+último, `Enter SetRes: 1142x540` (volta pro menu) → `CreateDevice` → abort.
+
+### 1. Crash real: a Release do jogo destruiu o device compartilhado
+
+Sequência no log: 3× `CreateDevice` (1142x540 fresh → 914x432 reuse+reset →
+1142x540 reuse+reset). A UE2 faz SetRes assim: **Release do device + novo
+CreateDevice** para cada mudança de resolução. O bridge mantém UM device
+hospedeiro (915efb0, o Android só concede um VkSurface por janela), mas o
+caminho `reuse+reset` devolvia o MESMO wrapper sem conceder a referência COM
+que o contrato de `CreateDevice` garante ao chamador. Contagem: 2 → 1 →
+(no reset dos filmes) 1 → (Release do jogo antes do 3º) **0 → device
+destruído** → o 3º `CreateDevice(reuse+reset)` rodou `Reset` em objeto
+liberado → exceção dentro do dxvk (`D3D9CommonTexture`/`CreateBackBuffers`)
+→ unwinding destruiu o `DxvkDevice` já morto → `waitForIdle` →
+**`FORTIFY: pthread_mutex_lock called on a destroyed mutex`** → abort.
+
+**Correção** (`d3d9_bridge.cpp`): o caminho reuse+reset faz `AddRef()` ao
+conceder o wrapper (balanceia a Release do chamador) e só devolve wrapper
+em caso de sucesso — espelhando o caminho fresh. Além disso, `CreateDevice`,
+`Reset` e `Present` agora passam por um guard de exceção: qualquer falha
+interna do dxvk vira `D3DERR_DRIVERINTERNALERROR`/`D3DERR_DEVICELOST`
+(caminho de recuperação que a UE2 já conhece) em vez de terminar o processo.
+
+### 2. Toque pula vídeos (canal direto na WndProc)
+
+O build #44 fez os intents chegarem (`hud: N applied` cresce durante os
+vídeos no iutlog), mas o loop de vídeo **não bombeia a fila de mensagens**
+— os WM_KEYDOWN/WM_LBUTTONDOWN ficavam na fila sem leitor. Canal novo:
+enquanto um .bik está aberto (`kernel32.c` conta os arquivos abertos,
+`hud_movie_playing()`), o `vinput_key_tap` entrega o WM **diretamente na
+WndProc do jogo** (`user32_key_direct`, semântica SendMessage, mesma thread,
+fora de qualquer dxvk call). O HUD Java transforma o toque livre em ESC
+(`HudOverlay`: poll bit 9 = filme; latched `everMenu` impede que o vídeo de
+fundo do menu perca os cliques reais). ESC chip (K_KTAP) usa o mesmo canal.
+
+### 3. Overruns de textura do Bink (cosmético, contido)
+
+`d3d9: GUEST OVERRUN ... tex-rect 914x432` durante os vídeos: o Bink escreve
+≥17 bytes além da região travada (slack 16 + canary 32 aguentam a detecção;
+`gbigalloc` isola por página, o heap do guest não é corrompido). Sem ação
+nesta rodada; registrar caso um dia apareça como artefato visual.
+
+### Validação local
+
+* `sh scripts/test_hud.sh` — vinput/user32/kernel32/hud_jni/hud_state
+  compilam, `hud_jni selftest: ok`, `hud_state selftest: ok`;
+* ecj (-source 17) + stubs Android mínimos: HudOverlay.java +
+  HudBridge.java — 0 erros (stubs recriados em scripts/stubs/).
+
+### O que esperar no aparelho
+
+* Os três vídeos tocam; um toque em qualquer área livre (ou o chip ESC)
+  agora tenta pulá-los pelo canal direto — se este build do motor não
+  consultar input no loop de vídeo, eles simplesmente correm até o fim
+  (~90 s, uma vez por boot) e o app **não fecha mais**;
+* Menu volta em 1142x540 sem abort; cliques e stick funcionam;
+* Se algum reset falhar de verdade, o jogo recebe um D3DERR tratável
+  (retry do SetRes) em vez de fechar.

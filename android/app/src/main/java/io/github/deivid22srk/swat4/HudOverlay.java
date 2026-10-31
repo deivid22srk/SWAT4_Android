@@ -145,6 +145,12 @@ public class HudOverlay extends View {
 
     private int ctx;                        /* HudBridge.CTX_* */
     private boolean doorNear;
+    /** live: a Bink movie file is open (intro videos — runtime-reported). */
+    private boolean movie;
+    /** latched once the main menu has been seen: the menu's own background
+     * video keeps the movie bit set, but from then on free fingers must
+     * stay the menu mouse, never the skip key. */
+    private boolean everMenu;
     private int guestW, guestH;             /* guest client px (menu mapping) */
     private long menuArrowRepAt;            /* menu stick repeat deadline */
 
@@ -414,8 +420,10 @@ public class HudOverlay extends View {
             if (HudBridge.ok() && HudBridge.poll(pollOut)) {
                 int nctx = pollOut[0] & 0xFF;
                 boolean ndoor = (pollOut[0] & HudBridge.DOOR_BIT) != 0;
+                boolean nmov = (pollOut[0] & HudBridge.MOVIE_BIT) != 0;
                 guestW = pollOut[1];
                 guestH = pollOut[2];
+                if (nctx == HudBridge.CTX_MENU) everMenu = true;
                 if (nctx != ctx) {
                     releaseAll(); /* buttons live everywhere: drop holds on any flip */
                     ctx = nctx;
@@ -423,6 +431,10 @@ public class HudOverlay extends View {
                 }
                 if (ndoor != doorNear) {
                     doorNear = ndoor;
+                    changed = true;
+                }
+                if (nmov != movie) {
+                    movie = nmov;
                     changed = true;
                 }
             }
@@ -493,6 +505,8 @@ public class HudOverlay extends View {
                 boolean ndoor = (pollOut[0] & HudBridge.DOOR_BIT) != 0;
                 guestW = pollOut[1];
                 guestH = pollOut[2];
+                if (nctx == HudBridge.CTX_MENU) everMenu = true;
+                movie = (pollOut[0] & HudBridge.MOVIE_BIT) != 0;
                 if (nctx != ctx) {
                     releaseAll();
                     ctx = nctx;
@@ -576,6 +590,17 @@ public class HudOverlay extends View {
             }
         } else if (ctx == HudBridge.CTX_MISSION) {
             p.role = R_LOOK;
+        } else if (movie && !everMenu) {
+            /* startup movies: no GUI exists yet and the guest never pumps its
+             * message queue there, so a free finger is the skip key (ESC)
+             * instead of the menu mouse. The runtime delivers the WM straight
+             * into the game's WndProc while a .bik is open. everMenu latches
+             * once the menu exists: the menu's own background video must keep
+             * taking real clicks. */
+            p.role = R_BTN;
+            p.btn = -1;
+            HudBridge.post(HudBridge.EV_KEY, DIK_ESC, 0x100 | 1);
+            pendAdd(DIK_ESC, false);
         } else { /* MENU / UNKNOWN: the finger is the game's mouse */
             p.role = R_MENU;
             menuMove(x, y);

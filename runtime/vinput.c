@@ -5,6 +5,10 @@
 #include "vinput.h"
 
 void user32_key_event(uint32_t vk, uint32_t sc, int down);
+/* Direct WM delivery into the guest WndProc (user32.c): SendMessage
+ * semantics on the game thread. The movie loop never pumps the queue, so
+ * keys that only sit there can never reach it. */
+void user32_key_direct(uint32_t vk, uint32_t sc, int down);
 /* Posts a raw mouse message into the game's queue (user32.c): msg =
  * WM_MOUSEMOVE/WM_LBUTTONDOWN/WM_LBUTTONUP, wp = MK_* flags, lp =
  * (y<<16)|x in client pixels. Implemented like user32_key_event. */
@@ -85,7 +89,14 @@ void vinput_key_tap(uint8_t dik, int down) {
     /* Post the WM only on a real state edge: a second finger pressing the
      * same tap button inside the 120 ms window must not send a duplicate
      * WM_KEYDOWN (the DirectInput path dedupes by state, this one doesn't). */
-    if (was != (down ? 1 : 0)) user32_key_event(vk_of_dik(dik), dik, down);
+    if (was == (down ? 1 : 0)) return;
+    /* Movie phase: the guest never pumps its message queue there (bnlog
+     * iutlog: the three startup videos swallowed every queued key), so
+     * hand the WM straight to the game's WndProc — the channel a real
+     * keyboard would reach it through. Everywhere else the queue works
+     * (the game's own pump drains it) and keeps the engine's own timing. */
+    if (hud_movie_playing()) user32_key_direct(vk_of_dik(dik), dik, down);
+    else user32_key_event(vk_of_dik(dik), dik, down);
 }
 
 uint32_t vinput_key_edges(void) { return s_edges; }

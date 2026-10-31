@@ -750,6 +750,19 @@ static void mkdirs_for(const char *path) {
         if (*q == '/') { *q = 0; mkdir(tmp, 0755); *q = '/'; }
 }
 
+/* HUD: how many Bink movie files (.bik) are open right now. The startup
+ * videos are the only phase in which the guest never pumps its message
+ * queue, so the touch HUD routes taps to the skip key exactly while this
+ * is > 0 (hud_jni.c poll bit 9, vinput.c tap routing). */
+static int g_hud_movies;
+int hud_movie_playing(void) {
+    return __atomic_load_n(&g_hud_movies, __ATOMIC_RELAXED) > 0;
+}
+static int is_bik_path(const char *p) {
+    size_t n = p ? strlen(p) : 0;
+    return n > 4 && !strcasecmp(p + n - 4, ".bik");
+}
+
 SHIM(CreateFileA) {
     const char *name = GSTR(ARG(0));
     TRACE("CreateFileA(%s)", name ? name : "(null)");
@@ -812,6 +825,7 @@ SHIM(CreateFileA) {
     GFile *f = calloc(1, sizeof *f);
     f->fd = fd;
     snprintf(f->path, sizeof f->path, "%s", host);
+    if (is_bik_path(host)) __atomic_fetch_add(&g_hud_movies, 1, __ATOMIC_RELAXED);
     rt_set_last_error(c, exists && (disp == 2 || disp == 4) ? ERROR_ALREADY_EXISTS : 0);
     RET(h_new(H_FILE, f), 7);
 }
@@ -895,7 +909,12 @@ SHIM(CloseHandle) {
     uint32_t h = ARG(0);
     struct HObj *s = h_slot(h);
     if (!s) RET(0, 1);
-    if (s->type == H_FILE) { close(((GFile *)s->obj)->fd); free(s->obj); }
+    if (s->type == H_FILE) {
+        GFile *gf = (GFile *)s->obj;
+        if (is_bik_path(gf->path)) __atomic_fetch_sub(&g_hud_movies, 1, __ATOMIC_RELAXED);
+        close(gf->fd);
+        free(s->obj);
+    }
     /* waitables may still be referenced by running threads: leak them */
     pthread_mutex_lock(&g_hlock);
     s->type = H_FREE;

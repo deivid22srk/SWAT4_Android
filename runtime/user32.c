@@ -214,6 +214,29 @@ void user32_mouse_msg(uint32_t msg, uint32_t wp, uint32_t lp) {
     post_msg(msg, wp, lp);
 }
 
+/* WM_KEYDOWN/WM_KEYUP delivered straight into the guest WndProc
+ * (SendMessage semantics, same thread). The intro-movie loop never calls
+ * PeekMessage (bnlog iutlog: three startup videos swallowed every queued
+ * key and click), so a key that only sits in the queue can never skip it;
+ * the direct dispatch reaches the same handler DispatchMessageA would
+ * call. Game thread only, and only from the present hook where dxvk's
+ * Present has already returned (no dxvk state is held there). Falls back
+ * to the queue while no window class exists yet. */
+void user32_key_direct(uint32_t vk, uint32_t sc, int down) {
+    if (!vk) return;
+    uint32_t lp = 1 | (sc & 0xFF) << 16 | (down ? 0 : 0xC0000000u);
+    uint32_t msg = down ? 0x100 : 0x101;
+    if (g_wndproc) {
+        CPU *cc = rt_current_cpu();
+        if (cc) {
+            uint32_t args[4] = {user32_main_hwnd(), msg, vk, lp};
+            rt_invoke(cc, g_wndproc, 4, args);
+            return;
+        }
+    }
+    post_msg(msg, vk, lp);
+}
+
 SHIM(PeekMessageA) {
     uint32_t m = ARG(0), remove = ARG(4) & 1;
     if (g_quit == 1) {

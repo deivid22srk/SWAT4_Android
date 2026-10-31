@@ -39,6 +39,12 @@ public final class HudBridge {
     /** poll() out[0] bit 8: a real door sits within the game's Use range. */
     public static final int DOOR_BIT = 1 << 8;
 
+    /** poll() out[0] bit 9: a Bink movie file (.bik) is open — the intro
+     * videos. The guest pumps no messages during them, so the overlay
+     * turns free-finger taps into the skip key (ESC) instead of the menu
+     * mouse while this bit is set (and the menu has never been seen). */
+    public static final int MOVIE_BIT = 1 << 9;
+
     private static volatile boolean sOk = false;
 
     static {

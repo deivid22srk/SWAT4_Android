@@ -29,6 +29,8 @@ echo "== gcc platform_sdl.c (drains the HUD ring in the present pump)"
 gcc $CF -c runtime/platform_sdl.c -o /tmp/chk_ps.o
 echo "== gcc user32.c (GetAsyncKeyState reads the virtual state)"
 gcc $CF -c runtime/user32.c -o /tmp/chk_u32.o
+echo "== gcc kernel32.c (hud_movie_playing: open .bik count)"
+gcc $CF -c runtime/kernel32.c -o /tmp/chk_k32.o
 echo "== g++ hud_state.cpp (game context)"
 g++ $CX -c runtime/hud_state.cpp -o /tmp/chk_hs.o
 echo "== g++ d3d9_bridge.cpp"
