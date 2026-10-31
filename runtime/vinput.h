@@ -51,6 +51,22 @@ uint32_t vinput_key_edges(void);
  * skip a merge copy when the overlay is idle. */
 int vinput_active(void);
 
+/* ---- menu mouse (HUD hidden: the game UI gets real mouse input) ----
+ * SWAT 4's menus are Windows-mouse driven (the GUI cursor sits parked at
+ * 0,0 on touch builds because GetCursorPos never moved and no WM_MOUSEMOVE
+ * is ever posted). While the overlay is hidden it feeds finger positions
+ * here; vinput tracks the virtual cursor and posts WM_MOUSEMOVE plus
+ * WM_LBUTTONDOWN/WM_LBUTTONUP through user32_mouse_msg, and GetCursorPos
+ * reports the same cursor. Coordinates are window client pixels. */
+/* Cursor moved to (x,y): posts WM_MOUSEMOVE only when the integer position
+ * changed (finger events stream far faster than the game consumes). */
+void vinput_menu_move(int x, int y);
+/* Left-button edge: 1 = press (WM_LBUTTONDOWN), 0 = release (WM_LBUTTONUP).
+ * Duplicate edges are ignored, so several fingers can share the state. */
+void vinput_menu_button(int down);
+/* Current virtual cursor for the GetCursorPos shim; 0,0 before first use. */
+void vinput_cursor(int *x, int *y);
+
 #ifdef __cplusplus
 }
 #endif

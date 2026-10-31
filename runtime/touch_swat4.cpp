@@ -49,7 +49,7 @@ extern "C" void *platform_window(void);
 #define TOUCH_MAXPEND 8 /* in-flight 120 ms tap auto-releases */
 
 /* Finger roles. */
-enum { R_NONE = 0, R_STICK, R_LOOK, R_BTN, R_CONSUMED };
+enum { R_NONE = 0, R_STICK, R_LOOK, R_BTN, R_CONSUMED, R_MMENU };
 
 /* Button ids (also indices into the eased-alpha array). */
 enum {
@@ -76,7 +76,7 @@ typedef struct {
     float scale;        /* 0.5..2.0, multiplies h/720 */
     float opacity;      /* 0.15..1.0 */
     float look_sens;    /* 0.2..3.0 */
-    float stick_radius; /* 0.7..1.6, multiplies 0.16*h */
+    float stick_radius; /* 0.7..1.6, multiplies 0.105*h */
     int look_invert_y;
     int handed;         /* 1 = mirrored (stick right, actions left) */
     int labels;         /* draw text labels */
@@ -238,6 +238,7 @@ static void hud_cfg_defaults(HudCfg *c) {
     c->opacity = 0.55f;
     c->look_sens = 1.0f;
     c->stick_radius = 1.0f;
+    c->labels = 1; /* unlabeled dark boxes read as decoration: label by default */
 }
 static void hud_cfg_clamp(HudCfg *c) {
     c->scale = minf(maxf(c->scale, 0.5f), 2.0f);
@@ -252,10 +253,14 @@ static void hud_cfg_clamp(HudCfg *c) {
     c->always_show = c->always_show ? 1 : 0;
 }
 
-/* Tiny parser for <g_save_dir>/hud.ini: lines "key=value", '#' comments. */
+/* Tiny parser for <g_save_dir>/hud.ini: lines "key=value", '#' comments.
+ * Returns 0 for a stale file: pre-version files carried labels=0 and the
+ * oversized stick default, so they are replaced once by the v2 defaults
+ * (ts_init resets and rewrites; user edits after that are kept). */
 static int hud_cfg_load(HudCfg *c, const char *path) {
     FILE *f = fopen(path, "r");
     if (!f) return 0;
+    int version = 0;
     char line[128];
     while (fgets(line, sizeof line, f)) {
         char *p = strchr(line, '#');
@@ -268,7 +273,8 @@ static int hud_cfg_load(HudCfg *c, const char *path) {
         if (eq == line) continue;
         char *e = eq - 1;
         while (e > line && (*e == ' ' || *e == '\t')) *e-- = 0;
-        if (!strcmp(key, "scale")) c->scale = strtof(val, NULL);
+        if (!strcmp(key, "version")) version = (int)strtol(val, NULL, 10);
+        else if (!strcmp(key, "scale")) c->scale = strtof(val, NULL);
         else if (!strcmp(key, "opacity")) c->opacity = strtof(val, NULL);
         else if (!strcmp(key, "look_sens")) c->look_sens = strtof(val, NULL);
         else if (!strcmp(key, "stick_radius")) c->stick_radius = strtof(val, NULL);
@@ -280,6 +286,7 @@ static int hud_cfg_load(HudCfg *c, const char *path) {
         else if (!strcmp(key, "always_show")) c->always_show = (int)strtol(val, NULL, 10);
     }
     fclose(f);
+    if (version < 2) return 0;
     hud_cfg_clamp(c);
     return 1;
 }
@@ -287,14 +294,16 @@ static int hud_cfg_load(HudCfg *c, const char *path) {
 static void hud_cfg_save(const char *path, const HudCfg *c) {
     FILE *f = fopen(path, "w");
     if (!f) return;
-    /* Only written when the file does not exist yet (ts_init); user edits
-     * are loaded, clamped and kept, never overwritten. */
-    fprintf(f, "# SWAT4 Android touch overlay config\n"
+    /* Only written when the file does not exist yet or is a stale pre-v2
+     * file (ts_init); user edits are loaded, clamped and kept, never
+     * overwritten. */
+    fprintf(f, "# SWAT4 Android touch overlay config (version 2)\n"
                "# scale 0.5-2.0, opacity 0.15-1.0, look_sens 0.2-3.0, stick_radius 0.7-1.6\n"
                "# look_invert_y / handed / labels / hold_crouch / hold_zoom: 0 or 1\n"
                "# AGACH (C) and ZOOM (Z) are 120 ms taps by default (the game's own\n"
                "# crouch/zoom modes toggle); set hold_crouch/hold_zoom=1 to hold the key.\n"
                "# always_show=1 keeps the HUD visible over menus/loading (legacy).\n"
+               "version=2\n"
                "scale=%g\nopacity=%g\nlook_sens=%g\nlook_invert_y=%d\n"
                "handed=%d\nlabels=%d\nstick_radius=%g\nhold_crouch=%d\nhold_zoom=%d\n"
                "always_show=%d\n",
@@ -563,7 +572,9 @@ static void ts_ensure_layout(TouchState *ts, int w, int h, const Safe *s) {
     ts->zone[3] = 0.38f * h;
     if (ts->cfg.handed)
         ts->zone[0] = (w - s->right) - (ts->zone[0] - s->left) - ts->zone[2];
-    ts->stick_r = ts->cfg.stick_radius * 0.16f * h;
+    /* 0.105*h: at 1080p the stick disc is 238 px (~1.5 cm on a 6.5" phone).
+     * The old 0.16*h (346 px) read as "enormous" on device. */
+    ts->stick_r = ts->cfg.stick_radius * 0.105f * h;
     ts->stick_dead = 0.12f * ts->stick_r;
     if (!had) return;
 
@@ -599,6 +610,7 @@ static void ts_ensure_layout(TouchState *ts, int w, int h, const Safe *s) {
     ts->active = 0;
     ts->stick_held = 0;
     ts->stick_dx = ts->stick_dy = 0;
+    int menu_dropped = 0;
     for (int i = 0; i < nlive; i++) {
         Finger *of = &live[i];
         if (!will_keep[i]) {
@@ -612,6 +624,8 @@ static void ts_ensure_layout(TouchState *ts, int w, int h, const Safe *s) {
                         will_keep[j])
                         kept_by_other = 1;
                 if (!kept_by_other) apply_release(&oldb[i]);
+            } else if (of->role == R_MMENU) {
+                menu_dropped = 1;
             }
             continue; /* looks and consumed fingers simply end */
         }
@@ -637,6 +651,12 @@ static void ts_ensure_layout(TouchState *ts, int w, int h, const Safe *s) {
             nf->cx = nf->cy = 0; /* stale carry in old pixels: drop, not jump */
         }
     }
+    if (menu_dropped) {
+        int still = 0;
+        for (int i = 0; i < TOUCH_MAXF; i++)
+            if (ts->f[i].role == R_MMENU) still = 1;
+        if (!still) vinput_menu_button(0); /* no menu finger survived: unclick */
+    }
 }
 
 static int in_zone(const float *z, float x, float y) {
@@ -657,8 +677,25 @@ static int looker_count(const TouchState *ts) {
 }
 
 static void ts_down(TouchState *ts, long fid, float x, float y, int w, int h, uint32_t now) {
-    /* Menu/loading: the game UI gets every touch; nothing is consumed. */
-    if (ts->ctx_hidden) return;
+    /* Menu/loading: the game UI is Windows-mouse driven, so every touch
+     * becomes a real mouse move + left click at the touch position
+     * (vinput_menu_* -> WM_MOUSEMOVE / WM_LBUTTONDOWN / WM_LBUTTONUP and
+     * the GetCursorPos virtual cursor). Nothing is consumed. */
+    if (ts->ctx_hidden) {
+        Finger *mf = NULL;
+        for (int i = 0; i < TOUCH_MAXF && !mf; i++)
+            if (ts->f[i].role == R_NONE) mf = &ts->f[i];
+        if (mf) {
+            mf->id = fid;
+            mf->role = R_MMENU;
+            mf->lx = x;
+            mf->ly = y;
+            ts->active++;
+            vinput_menu_move((int)x, (int)y);
+            vinput_menu_button(1);
+        }
+        return;
+    }
     ts_ensure_layout(ts, w, h, &ts->safe);
     Finger *fr = NULL;
     for (int i = 0; i < TOUCH_MAXF && !fr; i++)
@@ -764,6 +801,8 @@ static void ts_move(TouchState *ts, long fid, float x, float y) {
         if (tx || iy) vinput_mouse_delta(tx, iy);
         fr->lx = x;
         fr->ly = y;
+    } else if (fr->role == R_MMENU) {
+        vinput_menu_move((int)x, (int)y); /* drag on a menu moves the cursor */
     }
 }
 
@@ -778,6 +817,8 @@ static void ts_up(TouchState *ts, long fid) {
         stick_keys(fr->sector, 0);
         fr->sector = 0;
         if (--ts->stick_held <= 0) { ts->stick_held = 0; ts->stick_dx = ts->stick_dy = 0; }
+    } else if (fr->role == R_MMENU) {
+        vinput_menu_button(0); /* tap = click: down was posted on FINGERDOWN */
     }
     fr->role = R_NONE;
     if (ts->active > 0) ts->active--;
@@ -786,6 +827,7 @@ static void ts_up(TouchState *ts, long fid) {
 /* App lost focus / finger tracking: drop everything so no key or mouse
  * button stays latched into the game. */
 static void ts_release_all(TouchState *ts, uint32_t now) {
+    int menu_was = 0;
     for (int i = 0; i < TOUCH_MAXF; i++) {
         Finger *fr = &ts->f[i];
         if (fr->role == R_NONE) continue;
@@ -795,9 +837,12 @@ static void ts_release_all(TouchState *ts, uint32_t now) {
         } else if (fr->role == R_STICK) {
             stick_keys(fr->sector, 0);
             fr->sector = 0;
+        } else if (fr->role == R_MMENU) {
+            menu_was = 1;
         }
         fr->role = R_NONE;
     }
+    if (menu_was) vinput_menu_button(0); /* never latch the menu click */
     ts->active = 0;
     ts->stick_held = 0;
     ts->stick_dx = ts->stick_dy = 0;
@@ -814,7 +859,21 @@ static void ts_set_context(TouchState *ts, int hidden, uint32_t now) {
     if (hidden == ts->ctx_hidden) return;
     ts->ctx_hidden = hidden;
     OLOG("overlay: hud %s", hidden ? "hidden (menu/loading)" : "shown (mission)");
-    if (hidden) ts_release_all(ts, now);
+    if (hidden) {
+        ts_release_all(ts, now);
+    } else {
+        /* leaving menus: menu-mouse fingers end and the click MUST be
+         * released, or a press held when the mission started would fire
+         * the game's left button forever. */
+        int menu_was = 0;
+        for (int i = 0; i < TOUCH_MAXF; i++)
+            if (ts->f[i].role == R_MMENU) {
+                ts->f[i].role = R_NONE;
+                if (ts->active > 0) ts->active--;
+                menu_was = 1;
+            }
+        if (menu_was) vinput_menu_button(0);
+    }
     (void)now;
 }
 
@@ -822,6 +881,8 @@ static void ts_init(TouchState *ts, const char *ini_path) {
     memset(ts, 0, sizeof *ts);
     hud_cfg_defaults(&ts->cfg);
     if (!hud_cfg_load(&ts->cfg, ini_path)) {
+        /* missing OR stale pre-v2 file: clean defaults, rewrite once */
+        hud_cfg_defaults(&ts->cfg);
         hud_cfg_save(ini_path, &ts->cfg);
         OLOG("overlay: wrote defaults to %s", ini_path);
     }
@@ -846,6 +907,8 @@ extern "C" {
 extern int g_wm_n;
 extern uint32_t g_wm_vk[], g_wm_sc[];
 extern int g_wm_down[];
+extern int g_mm_n;
+extern uint32_t g_mm_msg[], g_mm_wp[], g_mm_lp[];
 }
 
 #include <sys/mman.h> /* stage-2 tests: synthetic 4 GiB guest image */
@@ -898,20 +961,38 @@ int main(void) {
         FILE *f = fopen("/tmp/ts_test_bad.ini", "w");
         CHECK(f != NULL);
         if (f) {
-            fputs("scale=9.0\nopacity=0.0\nlook_sens=99\nlook_invert_y=1\nhanded=1\nstick_radius=0.1\nlabels=0\n", f);
+            fputs("version=2\nscale=9.0\nopacity=0.0\nlook_sens=99\nlook_invert_y=1\nhanded=1\nstick_radius=0.1\nlabels=0\n", f);
             fclose(f);
         }
         TouchState ts;
         ts_init(&ts, "/tmp/ts_test_bad.ini");
         CHECK(ts.cfg.scale == 2.0f && ts.cfg.opacity == 0.15f && ts.cfg.look_sens == 3.0f);
         CHECK(ts.cfg.look_invert_y == 1 && ts.cfg.handed == 1 && ts.cfg.stick_radius == 0.7f);
+        /* pre-version files (builds #36-#38 wrote labels=0 and the huge
+         * stick default) are stale: replaced by the v2 defaults once */
+        f = fopen("/tmp/ts_test_stale.ini", "w");
+        CHECK(f != NULL);
+        if (f) {
+            fputs("scale=1.5\nlabels=0\nstick_radius=1.0\n", f);
+            fclose(f);
+        }
+        TouchState t3;
+        ts_init(&t3, "/tmp/ts_test_stale.ini");
+        CHECK(t3.cfg.scale == 1.0f && t3.cfg.labels == 1 && t3.cfg.stick_radius == 1.0f);
         remove("/tmp/ts_test_missing.ini");
         TouchState t2;
         ts_init(&t2, "/tmp/ts_test_missing.ini");
-        CHECK(t2.cfg.scale == 1.0f && t2.cfg.opacity == 0.55f); /* defaults + file written */
+        CHECK(t2.cfg.scale == 1.0f && t2.cfg.opacity == 0.55f && t2.cfg.labels == 1); /* defaults + file written */
         FILE *g = fopen("/tmp/ts_test_missing.ini", "r");
         CHECK(g != NULL); /* defaults file was created */
-        if (g) fclose(g);
+        if (g) {
+            char buf[128];
+            int has_version = 0;
+            while (fgets(buf, sizeof buf, g))
+                if (!strncmp(buf, "version=2", 9)) has_version = 1;
+            fclose(g);
+            CHECK(has_version); /* the rewritten file is marked v2 */
+        }
     }
 
     /* --- layout: min touch target, on-screen, mirror --- */
@@ -976,13 +1057,14 @@ int main(void) {
     {
         uint32_t e0 = vinput_key_edges();
         float sx = ts.zone[0] + ts.zone[2] * 0.5f, sy = ts.zone[1] + ts.zone[3] * 0.5f;
+        float r = ts.stick_r; /* drag inside the disc so the leash stays out */
         ts_down(&ts, 201, sx, sy, W, H, now);
         CHECK(finger_find(&ts, 201) && finger_find(&ts, 201)->role == R_STICK);
-        ts_move(&ts, 201, sx + 60, sy - 60);
+        ts_move(&ts, 201, sx + 0.5f * r, sy - 0.5f * r);
         CHECK(vinput_keys()[DIK_W] && vinput_keys()[DIK_D]);
         CHECK(!vinput_keys()[DIK_A] && !vinput_keys()[DIK_S]);
         CHECK(vinput_key_edges() == e0 + 2); /* exactly W-down + D-down */
-        ts_move(&ts, 201, sx + 80, sy - 80); /* same sector */
+        ts_move(&ts, 201, sx + 0.65f * r, sy - 0.65f * r); /* same sector */
         CHECK(vinput_key_edges() == e0 + 2); /* nothing re-sent */
         ts_move(&ts, 201, sx + 5, sy + 5);   /* back inside the deadzone */
         CHECK(vinput_key_edges() == e0 + 4 && !vinput_keys()[DIK_W] && !vinput_keys()[DIK_D] &&
@@ -1151,14 +1233,15 @@ int main(void) {
     /* --- 9. stick hysteresis: jitter near the wedge boundary cannot flap --- */
     {
         float sx = ts.zone[0] + ts.zone[2] * 0.5f, sy = ts.zone[1] + ts.zone[3] * 0.5f;
+        float r = ts.stick_r;
         ts_down(&ts, 901, sx, sy, W, H, now);
-        ts_move(&ts, 901, sx + 70, sy - 70); /* NE, inside the leash: W+D */
+        ts_move(&ts, 901, sx + 0.6f * r, sy - 0.6f * r); /* NE, inside the leash: W+D */
         CHECK(vinput_keys()[DIK_W] && vinput_keys()[DIK_D]);
         uint32_t e0 = vinput_key_edges();
-        ts_move(&ts, 901, sx + 70, sy - 28); /* 21.8 deg: inside the hold band */
+        ts_move(&ts, 901, sx + 0.6f * r, sy - 0.24f * r); /* 21.8 deg: inside the hold band */
         CHECK(vinput_key_edges() == e0); /* no edge: the UP bit is kept alive */
         CHECK(vinput_keys()[DIK_W] && vinput_keys()[DIK_D]);
-        ts_move(&ts, 901, sx + 70, sy - 14); /* 11.3 deg: below the off threshold */
+        ts_move(&ts, 901, sx + 0.6f * r, sy - 0.12f * r); /* 11.3 deg: below the off threshold */
         CHECK(vinput_key_edges() == e0 + 1); /* W released exactly once */
         CHECK(!vinput_keys()[DIK_W] && vinput_keys()[DIK_D]);
         ts_up(&ts, 901);
@@ -1301,7 +1384,7 @@ int main(void) {
         FILE *f = fopen("/tmp/ts_test_hold.ini", "w");
         CHECK(f != NULL);
         if (f) {
-            fputs("hold_crouch=1\nhold_zoom=1\n", f);
+            fputs("version=2\nhold_crouch=1\nhold_zoom=1\n", f);
             fclose(f);
         }
         TouchState th;
@@ -1492,8 +1575,10 @@ int main(void) {
             hud_game_tick(1100);
             CHECK(hud_game_ctx() == HUD_CTX_UNKNOWN);
 
-            /* S3: engine live, no pawn -> MENU, HUD hidden and pass-through.
-             * The array carries 3 strangers + 2 doors (classes are the test's
+            /* S3: engine live, no pawn -> MENU, HUD hidden; touches become
+             * real menu-mouse clicks (WM_MOUSEMOVE + WM_LBUTTONDOWN, DI
+             * left latched, GetCursorPos tracks the virtual cursor). The
+             * array carries 3 strangers + 2 doors (classes are the test's
              * own stand-ins for the real PrivateStaticClass slots). */
             w32(CLS_ADDR, CLS);
             w32(CLSDOOR_ADDR, DOORCLS);
@@ -1517,10 +1602,17 @@ int main(void) {
             CHECK(hud_game_ctx() == HUD_CTX_MENU);
             ts_set_context(&ts, 1, 1200);
             CHECK(ts.ctx_hidden);
+            int mm0 = g_mm_n;
             vinput_mouse_take(&mx, &my);
-            ts_down(&ts, 4101, f->x + f->w / 2, f->y + f->h / 2, W, H, 1200);
-            CHECK((vinput_mouse_buttons() & 1u) == 0); /* menu: nothing fires */
-            CHECK(finger_find(&ts, 4101) == NULL);     /* not even consumed */
+            ts_down(&ts, 4101, 500, 300, W, H, 1200);
+            CHECK(finger_find(&ts, 4101) && finger_find(&ts, 4101)->role == R_MMENU);
+            CHECK((vinput_mouse_buttons() & 1u) != 0); /* menu click latched */
+            CHECK(g_mm_n >= mm0 + 2);                  /* MOUSEMOVE + LBUTTONDOWN */
+            CHECK((g_mm_lp[g_mm_n - 1] & 0xFFFF) == 500 && (g_mm_lp[g_mm_n - 1] >> 16) == 300);
+            { int cx, cy; vinput_cursor(&cx, &cy); CHECK(cx == 500 && cy == 300); }
+            ts_up(&ts, 4101);
+            CHECK((vinput_mouse_buttons() & 1u) == 0); /* click released */
+            CHECK(g_mm_msg[g_mm_n - 1] == 0x202);      /* WM_LBUTTONUP last */
 
             /* S4: the pawn appears -> MISSION within one tick (throttle beat:
              * the scan ran at 1200, this is 1300 > 1200+50) */
@@ -1591,26 +1683,95 @@ int main(void) {
             CHECK(finger_find(&ts, 4111) && finger_find(&ts, 4111)->role == R_LOOK);
             CHECK(vinput_key_edges() == ef1);
 
-            /* S7: flip to hidden releases held keys exactly once */
+            /* S7: flip to hidden releases held keys exactly once; touches
+             * in the hidden state become menu-mouse clicks, and a press
+             * still held when the mission returns is released (never
+             * latched into the mission). */
             w32(PAWN + 0x24, CLS);
             hud_game_tick(1600);
             CHECK(hud_game_ctx() == HUD_CTX_MISSION);
             ts_set_context(&ts, 0, 1600);
             vinput_mouse_take(&mx, &my);
             uint32_t e0 = vinput_key_edges();
+            int mmS7 = g_mm_n;
             ts_down(&ts, 4103, f->x + f->w / 2, f->y + f->h / 2, W, H, 1600);
             CHECK((vinput_mouse_buttons() & 1u) != 0);
+            CHECK(g_mm_n == mmS7);                     /* mission: no WM mouse */
             ts_set_context(&ts, 1, 1650);  /* menu while holding FOGO */
             CHECK((vinput_mouse_buttons() & 1u) == 0); /* hold released */
             CHECK(finger_find(&ts, 4103) == NULL);
-            ts_down(&ts, 4104, f->x + f->w / 2, f->y + f->h / 2, W, H, 1650);
-            CHECK((vinput_mouse_buttons() & 1u) == 0); /* blind: pass-through */
-            ts_set_context(&ts, 0, 1700);
-            CHECK((vinput_mouse_buttons() & 1u) == 0); /* not re-pressed */
+            ts_down(&ts, 4104, 600, 400, W, H, 1650);
+            CHECK(finger_find(&ts, 4104) && finger_find(&ts, 4104)->role == R_MMENU);
+            CHECK((vinput_mouse_buttons() & 1u) != 0); /* menu click down */
+            ts_set_context(&ts, 0, 1700);  /* mission returns mid-press */
+            CHECK(finger_find(&ts, 4104) == NULL);     /* menu finger dropped */
+            CHECK((vinput_mouse_buttons() & 1u) == 0); /* click released, not re-pressed */
+            CHECK(g_mm_msg[g_mm_n - 1] == 0x202);      /* WM_LBUTTONUP posted */
             CHECK(vinput_key_edges() == e0);           /* no key churn */
+
+            /* S9: a pawn whose map package is "Entry" is the menu backdrop,
+             * not a mission — the HUD must stay hidden there. Chain: pawn
+             * ->Outer(+0x18)= ULevel ->Outer= UPackage, name via Names[]. */
+            {
+                const uint32_t PAWN2 = 0x2BBB5000, LVL2 = 0x2BBB6000;
+                const uint32_t PKG2 = 0x2BBB7000, NENT = 0x2BBB8000, NENT2 = 0x2BBB9000;
+                w32(DATA + 8, 0x2FFF6000);     /* real pawn out of the array */
+                w32(DATA + 20, PAWN2);         /* the Entry pawn */
+                w32(GOBJ_ADDR + 4, 6);         /* TArray.Num = 6 */
+                w32(PAWN2 + 0x24, CLS);        /* same ASwatPlayer class */
+                w32(PAWN2 + 0x18, LVL2);       /* actor Outer = ULevel */
+                w32(LVL2 + 0x18, PKG2);        /* level Outer = UPackage */
+                w32(PKG2 + 0x20, 0x123);       /* package FName index */
+                w32(0x0128C2C0 + 0x123 * 4, NENT);
+                for (int i = 0; i < 6; i++) m[NENT + 0xC + i] = (uint8_t)"Entry"[i];
+                hud_game_tick(1800);
+                CHECK(hud_game_ctx() == HUD_CTX_MENU);  /* Entry backdrop: menu */
+                CHECK(hud_pawn_entry() == 1);
+                w32(0x0128C2C0 + 0x123 * 4, NENT2);     /* same name as UTF-16 */
+                for (int i = 0; i < 6; i++) {
+                    m[NENT2 + 0xC + 2 * i] = (uint8_t)"Entry"[i];
+                    m[NENT2 + 0xC + 2 * i + 1] = 0;
+                }
+                hud_game_tick(1900);
+                CHECK(hud_game_ctx() == HUD_CTX_MENU);
+                CHECK(hud_pawn_entry() == 1);
+                for (int i = 0; i < 6; i++) m[NENT + 0xC + i] = (uint8_t)"FooBar"[i];
+                w32(0x0128C2C0 + 0x123 * 4, NENT);      /* ANSI again */
+                hud_game_tick(2000);
+                CHECK(hud_game_ctx() == HUD_CTX_MISSION); /* other package: real */
+                CHECK(hud_pawn() == PAWN2);
+                CHECK(hud_pawn_entry() == 0);
+            }
             munmap(img, 0x40000000u);
         }
         hud_state_reset_for_tests();
+    }
+
+    /* --- 15. menu mouse hygiene: dedupe, cursor tracking, and a layout
+     * rebuild while hidden releases the click instead of latching it --- */
+    {
+        remove("/tmp/ts_test_missing.ini");
+        TouchState ts;
+        ts_init(&ts, "/tmp/ts_test_missing.ini");
+        ts_ensure_layout(&ts, W, H, &s);
+        ts_set_context(&ts, 1, 10); /* hidden */
+        int n0 = g_mm_n;
+        uint32_t b0 = vinput_mouse_buttons();
+        ts_down(&ts, 501, 400, 200, W, H, 10);
+        CHECK(finger_find(&ts, 501) && finger_find(&ts, 501)->role == R_MMENU);
+        int down_at = g_mm_n;
+        ts_move(&ts, 501, 400, 200);           /* same pixel: no message */
+        CHECK(g_mm_n == down_at);
+        ts_move(&ts, 501, 500, 300);           /* move: WM_MOUSEMOVE */
+        CHECK(g_mm_n == down_at + 1 && g_mm_msg[g_mm_n - 1] == 0x200);
+        { int cx, cy; vinput_cursor(&cx, &cy); CHECK(cx == 500 && cy == 300); }
+        /* window resize while the press is live: the rebuild drops the
+         * menu finger and MUST post the matching LBUTTONUP */
+        ts_ensure_layout(&ts, W, H + 2, &s);
+        CHECK(finger_find(&ts, 501) == NULL);
+        CHECK(g_mm_msg[g_mm_n - 1] == 0x202);
+        CHECK(vinput_mouse_buttons() == b0);   /* back to the baseline bits */
+        (void)n0;
     }
 
     printf(g_fail ? "\nSELFTEST FAILED (%d)\n" : "\nSELFTEST OK (%d failures)\n", g_fail);
@@ -1804,7 +1965,17 @@ static void build_frame(TouchState *ts) {
         }
     }
 
-    /* floating stick: rim + nub, only while held */
+    /* floating stick: rim + nub. While idle, a ghost at the rest spot marks
+     * the stick zone (without it users do not know where the stick lives —
+     * the floating disc only exists under a finger). */
+    float gx = ts->zone[0] + 0.32f * ts->zone[2], gy = ts->zone[1] + 0.62f * ts->zone[3];
+    float gr = ts->stick_r;
+    if (ts->stick_held <= 0 && !ts->grid_open) {
+        box(gx - gr, gy - gr, 2 * gr, 2 * gr, shade(0x101820, 0.16f * fade),
+            shade(0x90a8c0, 0.30f * fade));
+        box(gx - gr * 0.22f, gy - gr * 0.22f, gr * 0.44f, gr * 0.44f,
+            shade(0x6a9ad8, 0.30f * fade), shade(0xc8d8f0, 0.38f * fade));
+    }
     for (int i = 0; i < TOUCH_MAXF; i++) {
         if (ts->f[i].role != R_STICK) continue;
         float ox = ts->f[i].ox, oy = ts->f[i].oy, r = ts->stick_r;
@@ -1969,6 +2140,29 @@ extern "C" void touch_setup_guest(void) {
          g_ts.cfg.look_invert_y, g_ts.cfg.handed, g_ts.cfg.labels, (double)g_ts.cfg.stick_radius);
 }
 
+/* The game presents the menu/movie frames through an ADDITIONAL swapchain
+ * (DXVK logs a second Presenter right after the first device Present, with
+ * no Reset between them: CreateAdditionalSwapChain). touch_draw used to be
+ * wired to the device Present only, so the overlay drew exactly one frame
+ * and froze for the rest of the session while the event pump kept eating
+ * touches with a stale context. The bridge now captures the device here
+ * and calls touch_draw_frame() from both Present paths. */
+static IDirect3DDevice9 *g_overlay_dev;
+static uint32_t g_last_draw_ms;
+extern "C" void touch_draw(void *dev); /* defined below */
+
+extern "C" void touch_set_device(void *d) {
+    if (d && g_overlay_dev != (IDirect3DDevice9 *)d) {
+        g_overlay_dev = (IDirect3DDevice9 *)d;
+        OLOG("overlay: device captured (additional swapchain)");
+    }
+}
+
+extern "C" void touch_draw_frame(void) {
+    if (!g_overlay_dev) return;
+    touch_draw(g_overlay_dev); /* touch_draw stamps g_last_draw_ms itself */
+}
+
 extern "C" void touch_handle_event(const SDL_Event *e) {
     if (g_disabled) return;
     switch (e->type) {
@@ -1999,9 +2193,12 @@ extern "C" void touch_handle_event(const SDL_Event *e) {
         break;
     }
     case SDL_WINDOWEVENT:
+        /* FOCUS_LOST and MINIMIZED mean the app really went away. LEAVE is
+         * NOT tracked: Android raises it spuriously (log: "window event 11"
+         * seconds after boot) and force-releasing live touches mid-game
+         * drops held buttons for nothing. */
         if (e->window.event == SDL_WINDOWEVENT_FOCUS_LOST ||
-            e->window.event == SDL_WINDOWEVENT_MINIMIZED ||
-            e->window.event == SDL_WINDOWEVENT_LEAVE) {
+            e->window.event == SDL_WINDOWEVENT_MINIMIZED) {
             if (g_ts.active || g_ts.npend || g_ts.grid_open) {
                 OLOG("overlay: window event %d, releasing all touches", e->window.event);
                 touch_release_all();
@@ -2016,6 +2213,14 @@ extern "C" void touch_handle_event(const SDL_Event *e) {
 extern "C" void touch_draw(void *dev) {
     IDirect3DDevice9 *d = (IDirect3DDevice9 *)dev;
     if (g_disabled || !d) return;
+    g_overlay_dev = d; /* keep the swapchain path working if the game flips */
+    /* the game may Present through BOTH paths in one frame: draw at most
+     * once per millisecond (nothing changed between them) */
+    {
+        uint32_t t = SDL_GetTicks();
+        if (t == g_last_draw_ms) return;
+        g_last_draw_ms = t;
+    }
 
     if (!g_d3d_ok) {
         /* Transient failures (device lost while the app is backgrounded) are
@@ -2043,6 +2248,22 @@ extern "C" void touch_draw(void *dev) {
     hud_set_guest_mem(MEM); /* self-heals if MEM was not ready at setup */
     hud_game_tick(now);
     int ctx = hud_game_ctx();
+    /* one log line per context flip, naming the evidence: the 2026-10-31
+     * device log had NO flip lines at all because the overlay froze on the
+     * device-present path after one frame — this would have shown it. */
+    {
+        static int last_ctx = -1, entry_logged;
+        if (ctx != last_ctx) {
+            last_ctx = ctx;
+            entry_logged |= hud_pawn_entry();
+            OLOG("overlay: ctx %s pawn=%08x doors=%d%s",
+                 ctx == HUD_CTX_MENU ? "menu" : ctx == HUD_CTX_MISSION ? "mission" : "unknown",
+                 hud_pawn(), hud_door_count(), hud_pawn_entry() ? " (Entry pawn ignored)" : "");
+        } else if (hud_pawn_entry() && !entry_logged) {
+            entry_logged = 1;
+            OLOG("overlay: Entry pawn ignored (menu backdrop)");
+        }
+    }
     int hidden = ctx == HUD_CTX_MENU && !g_ts.cfg.always_show;
     /* one log line per menu->mission flip (loading always passes through
      * MENU, so every real mission start is covered) */

@@ -197,6 +197,13 @@ void user32_key_event(uint32_t vk, uint32_t sc, int down) {
     post_msg(down ? 0x100 : 0x101, vk, lp); /* WM_KEYDOWN / WM_KEYUP */
 }
 
+/* Raw mouse message from the touch overlay's menu mouse (vinput.c):
+ * WM_MOUSEMOVE / WM_LBUTTONDOWN / WM_LBUTTONUP with client coords packed
+ * in lParam, exactly like a real mouse would deliver them. */
+void user32_mouse_msg(uint32_t msg, uint32_t wp, uint32_t lp) {
+    post_msg(msg, wp, lp);
+}
+
 SHIM(PeekMessageA) {
     uint32_t m = ARG(0), remove = ARG(4) & 1;
     if (g_quit == 1) {
@@ -318,7 +325,17 @@ SHIM(CreateCompatibleBitmap) { RET(0x30003, 3); }
 SHIM(GetWindowThreadProcessId) { if (ARG(1)) M32(ARG(1)) = 0x42; RET(1, 2); }
 SHIM(ClientToScreen) { RET(1, 2); }
 SHIM(ScreenToClient) { RET(1, 2); }
-SHIM(GetCursorPos) { M32(ARG(0)) = 0; M32(ARG(0) + 4) = 0; RET(1, 1); }
+/* The client area IS the SDL window (platform_sdl.c re-syncs g_screen_*
+ * with the real window after the splash recreate), so the virtual cursor
+ * from vinput is returned as-is. */
+SHIM(GetCursorPos) {
+    extern void vinput_cursor(int *x, int *y);
+    int x, y;
+    vinput_cursor(&x, &y);
+    M32(ARG(0)) = (uint32_t)x;
+    M32(ARG(0) + 4) = (uint32_t)y;
+    RET(1, 1);
+}
 static void put_rect(uint32_t p) { M32(p) = 0; M32(p + 4) = 0; M32(p + 8) = (uint32_t)g_screen_w; M32(p + 12) = (uint32_t)g_screen_h; }
 SHIM(GetWindowRect) { put_rect(ARG(1)); RET(1, 2); }
 SHIM(GetClientRect) { put_rect(ARG(1)); RET(1, 2); }

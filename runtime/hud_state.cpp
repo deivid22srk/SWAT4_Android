@@ -18,13 +18,21 @@
 
 #include <string.h>
 
-/* Guest layout constants (see docs/HUD_PLAN.md §1 for the evidence). */
+/* Guest layout constants (see docs/HUD_PLAN.md §1 for the evidence).
+ * UOBJ_OUTER_OFF: disasm of UObject::GetPathName (Core.dll RVA 0x2d47,
+ * body walks the chain with `mov 0x18(%edi),%ecx` and recurses on it),
+ * the same function pins Name.Index at +0x20 and the Names table base.
+ * Actors are Outered by their ULevel, whose own Outer is the map package
+ * ("Entry" at the main menu — the boot log shows "Level is Level
+ * Entry.myLevel"). */
 #define CORE_BASE          0x01000000u
 #define SWATGAME_BASE      0x03200000u
 #define RVA_GOBJOBJECTS    0x294354u
 #define RVA_CLS_SWATPLAYER 0xab848u
 #define RVA_CLS_SWATDOOR   0xa6408u
 #define UOBJ_CLASS_OFF     0x24u
+#define UOBJ_OUTER_OFF     0x18u
+#define UOBJ_NAME_OFF      0x20u
 #define ACTOR_LOC_OFF      0x174u
 /* Guest ranges from docs/RECON.md §3: module images and the guest heap.
  * MOD_* is documentation (the module .data slots we read are addressed
@@ -34,6 +42,11 @@
 #define HEAP_LO            0x20000000u
 #define HEAP_HI            0x40000000u
 #define GOBJ_NUM_CAP       200000u  /* far above any real object count */
+/* FName table: Core.dll RVA 0x28c2c0 (guest 0x0128C2C0, docs/HUD_PLAN.md §1)
+ * holds FNameEntry** Names. Entries are heap pointers; the index is masked
+ * to 12 bits by the engine's own HashObject, so a wider value is bogus. */
+#define NAMES_BASE         (CORE_BASE + 0x28c2c0u)
+#define NAMES_MAX          0x1000u
 
 static const uint8_t *s_mem;
 static uint32_t s_last_scan;
@@ -43,6 +56,8 @@ static uint32_t s_pawn;
 static uint32_t s_pawn_loc[3];
 static uint32_t s_cls;              /* cached UClass* of ASwatPlayer */
 static uint32_t s_cls_door;         /* cached UClass* of ASwatDoor */
+static uint32_t s_gen;              /* scan generation (diagnostics) */
+static int s_entry_pawn;            /* pawn lives in the Entry map package */
 
 /* Doors are static geometry: positions are read once per scan into this
  * fixed table (no allocation). 32 covers SWAT 4 mission maps with margin;
@@ -65,6 +80,8 @@ void hud_set_guest_mem(const void *mem) {
 
 int hud_game_ctx(void) { return s_ctx; }
 
+uint32_t hud_scan_gen(void) { return s_gen; }
+
 uint32_t hud_pawn(void) { return s_pawn; }
 
 const uint32_t *hud_pawn_loc(void) { return s_pawn ? s_pawn_loc : NULL; }
@@ -78,9 +95,38 @@ static void read_loc(uint32_t obj, uint32_t out[3]) {
     memcpy(out, s_mem + obj + ACTOR_LOC_OFF, 12);
 }
 
+/* 1 when `obj`'s map package is named "Entry": the boot level behind the
+ * main menu (log: "LoadMap: Entry", "Level is Level Entry.myLevel").
+ * Actor -> ULevel -> UPackage via UObject::Outer at +0x18, then the package
+ * FName at +0x20 indexes the Names table (base 0x38c2c0, pinned by the same
+ * GetPathName disasm); the string sits at FNameEntry+0xC, ANSI or UTF-16.
+ * Any read that leaves the heap degrades to 0 (treat as a real mission). */
+static int in_entry_package(uint32_t obj) {
+    uint32_t lvl = r32(obj + UOBJ_OUTER_OFF);
+    if (!in_heap(lvl)) return 0;
+    uint32_t pkg = r32(lvl + UOBJ_OUTER_OFF);
+    if (!in_heap(pkg)) return 0;
+    uint32_t fname = r32(pkg + UOBJ_NAME_OFF);
+    if (fname >= NAMES_MAX) return 0;
+    uint32_t entry = r32(NAMES_BASE + fname * 4);
+    if (!in_heap(entry)) return 0;
+    static const char name[6] = "Entry";
+    for (int wide = 0; wide < 2; wide++) {
+        int ok = 1;
+        for (int i = 0; i < 6 && ok; i++) {
+            uint8_t c = s_mem[entry + 0xC + i * (wide + 1)];
+            ok = c == (uint8_t)name[i];
+        }
+        if (ok) return 1;
+    }
+    return 0;
+}
+
 static void scan(void) {
     s_pawn = 0;
     s_ndoors = 0;
+    s_entry_pawn = 0;
+    s_gen++;
     if (!s_mem) { s_ctx = HUD_CTX_UNKNOWN; return; }
     uint32_t cls = r32(SWATGAME_BASE + RVA_CLS_SWATPLAYER); /* module .data slot */
     uint32_t cls_door = r32(SWATGAME_BASE + RVA_CLS_SWATDOOR);
@@ -108,6 +154,14 @@ static void scan(void) {
             s_ndoors++;
         }
     }
+    /* A pawn in the boot Entry package is the menu backdrop, not a mission
+     * (UE2 keeps that level loaded behind the GUI). Without this check the
+     * HUD would claim a mission at the main menu whenever the engine leaves
+     * that pawn in the array. */
+    if (s_pawn && in_entry_package(s_pawn)) {
+        s_entry_pawn = 1;
+        s_pawn = 0;
+    }
     s_ctx = s_pawn ? HUD_CTX_MISSION : HUD_CTX_MENU;
 }
 
@@ -133,6 +187,10 @@ void hud_game_tick(uint32_t now) {
 }
 
 int hud_door_count(void) { return s_ndoors; }
+
+/* 1 when the last scan dropped a pawn because it lived in the Entry package
+ * (menu backdrop) — diagnostics only. */
+int hud_pawn_entry(void) { return s_entry_pawn; }
 
 /* Nearest cached door within `range` units of the pawn's CURRENT Location
  * (the game's own UseInterface door contexts use Range=128).
@@ -162,6 +220,8 @@ void hud_state_reset_for_tests(void) {
     s_cls = 0;
     s_cls_door = 0;
     s_ndoors = 0;
+    s_gen = 0;
+    s_entry_pawn = 0;
     memset(s_pawn_loc, 0, sizeof s_pawn_loc);
     memset(s_doors, 0, sizeof s_doors);
 }

@@ -127,8 +127,16 @@ void splash_finish(void) {
     g_window = SDL_CreateWindow(GAME_TITLE, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
                                 w, h, g_window_flags);
     if (!g_window) rt_fatal("SDL_CreateWindow after splash: %s", SDL_GetError());
-    LOG("splash: done (%d dll binds); window recreated flags=%x",
-        g_splash_binds, SDL_GetWindowFlags(g_window));
+    /* Android may land the recreated window smaller than the display mode
+     * (camera cutout: display 2400x1080, window 2285x1080). The guest's
+     * client area must match the WINDOW pixels, not the display mode, or
+     * the menu cursor coordinates from the touch overlay are off by the
+     * letterbox ratio. */
+    SDL_GetWindowSize(g_window, &w, &h);
+    extern void user32_set_screen(int, int);
+    user32_set_screen(w, h);
+    LOG("splash: done (%d dll binds); window recreated flags=%x size %dx%d",
+        g_splash_binds, SDL_GetWindowFlags(g_window), w, h);
 }
 
 void splash_bind_bump(void) { g_splash_binds++; }

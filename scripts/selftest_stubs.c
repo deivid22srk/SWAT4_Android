@@ -21,4 +21,17 @@ void user32_key_event(uint32_t vk, uint32_t sc, int down) {
     g_wm_n++;
 }
 
+/* Recorded menu-mouse messages (WM_MOUSEMOVE / WM_LBUTTONDOWN / UP). */
+int g_mm_n;
+uint32_t g_mm_msg[96], g_mm_wp[96], g_mm_lp[96];
+
+void user32_mouse_msg(uint32_t msg, uint32_t wp, uint32_t lp) {
+    if (g_mm_n < 96) {
+        g_mm_msg[g_mm_n] = msg;
+        g_mm_wp[g_mm_n] = wp;
+        g_mm_lp[g_mm_n] = lp;
+    }
+    g_mm_n++;
+}
+
 void rt_fatal(const char *fmt, ...) { (void)fmt; abort(); }

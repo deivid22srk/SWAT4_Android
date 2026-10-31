@@ -5,6 +5,10 @@
 #include "vinput.h"
 
 void user32_key_event(uint32_t vk, uint32_t sc, int down);
+/* Posts a raw mouse message into the game's queue (user32.c): msg =
+ * WM_MOUSEMOVE/WM_LBUTTONDOWN/WM_LBUTTONUP, wp = MK_* flags, lp =
+ * (y<<16)|x in client pixels. Implemented like user32_key_event. */
+void user32_mouse_msg(uint32_t msg, uint32_t wp, uint32_t lp);
 
 static volatile int32_t s_mx, s_my;       /* accumulated mouse deltas */
 static volatile uint32_t s_btn;           /* bit0 left, bit1 right, bit2 middle */
@@ -84,4 +88,40 @@ int vinput_active(void) {
     for (int i = 0; i < 256; i++)
         if (s_keys[i]) return 1;
     return 0;
+}
+
+/* ---- menu mouse: see vinput.h ---- */
+#define WM_MOUSEMOVE    0x0200u
+#define WM_LBUTTONDOWN  0x0201u
+#define WM_LBUTTONUP    0x0202u
+#define MK_LBUTTON      0x0001u
+
+static int s_cur_x, s_cur_y = -1;   /* last cursor position (y=-1: unset) */
+static int s_cur_left;              /* synthesized left button state */
+
+static void cur_post(uint32_t msg, uint32_t wp) {
+    user32_mouse_msg(msg, wp, ((uint32_t)s_cur_y << 16) | ((uint32_t)s_cur_x & 0xFFFF));
+}
+
+void vinput_menu_move(int x, int y) {
+    if (x == s_cur_x && y == s_cur_y) return; /* dedupe: fingers stream at ~120 Hz */
+    s_cur_x = x;
+    s_cur_y = y;
+    cur_post(WM_MOUSEMOVE, s_cur_left ? MK_LBUTTON : 0);
+}
+
+void vinput_menu_button(int down) {
+    down = down ? 1 : 0;
+    if (down == s_cur_left) return; /* WM expects real edges only */
+    s_cur_left = down;
+    /* Mirror into the DirectInput button state: the movie skip and some
+     * menu paths poll the device instead of the message queue. Safe while
+     * the HUD is hidden — nothing else drives button 0 there. */
+    vinput_mouse_button(0, down);
+    cur_post(down ? WM_LBUTTONDOWN : WM_LBUTTONUP, down ? MK_LBUTTON : 0);
+}
+
+void vinput_cursor(int *x, int *y) {
+    if (x) *x = s_cur_x;
+    if (y) *y = s_cur_y < 0 ? 0 : s_cur_y;
 }

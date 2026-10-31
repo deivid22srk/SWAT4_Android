@@ -23,8 +23,15 @@ void hud_game_tick(uint32_t now_ms);
 uint32_t hud_pawn(void);
 const uint32_t *hud_pawn_loc(void);   /* 3 raw float bits: X Y Z, or NULL */
 
+/* Diagnostics: bumped once per scan, lets the overlay log context changes
+ * with the evidence behind them (pawn/doors/level) once per second at most. */
+uint32_t hud_scan_gen(void);
+
 /* Doors (stage 3): refreshed on each scan (1 s), positions are static. */
 int hud_door_count(void);
+/* 1 when the last scan dropped a pawn because it sat in the Entry package
+ * (the boot level behind the main menu) — diagnostics only. */
+int hud_pawn_entry(void);
 /* 1 when a cached ASwatDoor sits within `range` game units of the pawn's
  * CURRENT Location; the game's own door contexts use Range=128. */
 int hud_door_near(float range, float *dist2_out);
