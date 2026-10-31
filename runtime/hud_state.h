@@ -23,6 +23,12 @@ void hud_game_tick(uint32_t now_ms);
 uint32_t hud_pawn(void);
 const uint32_t *hud_pawn_loc(void);   /* 3 raw float bits: X Y Z, or NULL */
 
+/* Doors (stage 3): refreshed on each scan (1 s), positions are static. */
+int hud_door_count(void);
+/* 1 when a cached ASwatDoor sits within `range` game units of the pawn's
+ * CURRENT Location; the game's own door contexts use Range=128. */
+int hud_door_near(float range, float *dist2_out);
+
 /* test hooks (selftest only) */
 void hud_state_reset_for_tests(void);
 void hud_set_scan_interval(uint32_t ms);

@@ -57,6 +57,7 @@ static uint32_t vk_of_dik(uint8_t dik) {
     case 0x1E: return 'A';
     case 0x1F: return 'S';
     case 0x20: return 'D';
+    case 0x21: return 'F';
     case 0x2A: return 0x10; /* Shift */
     case 0x2C: return 'Z';
     case 0x2D: return 'X';

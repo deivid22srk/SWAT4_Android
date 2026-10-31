@@ -968,3 +968,49 @@ Correções (commit "d3d9: one host device..."):
   flutuar sobre o menu e de injetar toques nele);
 * Ao iniciar uma missão: `overlay: mission context acquired (pawn=xxxxxxxx)`;
 * Ao voltar ao debriefing: `… -> menu` de novo, sem tecla presa.
+
+## 2026-10-31 — HUD contextual, etapa 3: contexto de porta (proximidade real)
+
+### Evidência nova
+
+* `ASwatDoor::PrivateStaticClass` = SwatGame RVA `0xa6408` (guest
+  `0x032A6408`) — export verificado. Portas são UObject com `Class` em
+  `+0x24` e `Location` em `+0x174` (mesmos offsets já pinados).
+* Faixa de porta: **128 unidades** — é o `Range=` que o próprio jogo usa nos
+  contextos de porta do `PlayerInterface_Use.ini` (`[LockedDoor]`,
+  `[ClosedDoor]`, etc.). O HUD usa a constante do jogo, não uma inventada.
+
+### Código
+
+* **`hud_state.cpp`**: o mesmo scan de 1 s agora também coleta até 32
+  `ASwatDoor` (classe exata, posição lida uma vez — portas não andam).
+  `hud_door_near(range)` mede a distância ao pawn **cada frame** usando a
+  Location do pawn, que passou a ser renovada a cada tick (memcpy de 12
+  bytes). O(32) por chamada, zero alocação.
+* **`touch_swat4.cpp`**: 16º botão base `PORTA` (5,5%h de piso, como todos),
+  no topo da coluna do USAR. Ação real: `DIK_F` = `IssueComplianceOrInteract`
+  (bind real de `DefUser.ini`; `vk_of_dik` ganhou o F). **O chip é
+  context-gated dos dois lados**: sem porta em 128 unidades ele não desenha
+  (fade a 0, quads pulados) e o toque passa reto (vira dedo de look); com
+  porta perto, desenha e dispara o F. Espelhamento (canhoto) e rebuild
+  tratam o 16º botão como todos os outros (selftest 13 atualizado para 16
+  botões sem sobreposição em 3 escalas × 3 proporções + notch).
+
+### Validação local
+
+* `sh scripts/test_touch.sh` — **241 asserts, 0 falhas**, incluindo:
+  S4b (2 portas coletadas pelo mesmo scan; porta a 10 unidades →
+  `hud_door_near` = 100.0 (10²); toque no PORTA → `DIK_F` down, tap de
+  120 ms, down+up exatos nas edges), S8 (pawn sai de todas as portas → chip
+  fecha **sem rescan** (Location renovada por tick) e o retângulo volta a
+  ser área de look), e o S3/S4/S5/S6/S7 da etapa 2 continuam verdes.
+* Mesma suíte sob ASan/UBSan: **0 falhas**; compilação com os flags reais
+  (DXVK native, C++17) limpa.
+
+### O que esperar no próximo log (aparelho)
+
+* `overlay: mission pawn=xxxxxxxx doors=N` — N é o número real de portas do
+  mapa lidas do array do engine (confirma a coleta em campo);
+* Chegar perto de uma porta → chip PORTA aparece (fade ~120 ms); o toque
+  dispara o mesmo caminho da tecla F física (menu contextual de porta do
+  próprio jogo); afastar-se → some.

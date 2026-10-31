@@ -54,11 +54,12 @@ enum { R_NONE = 0, R_STICK, R_LOOK, R_BTN, R_CONSUMED };
 /* Button ids (also indices into the eased-alpha array). */
 enum {
     B_FOGO, B_CMD, B_USAR, B_REC, B_AGACH, B_CORRER, B_ZOOM, B_MODO,
-    B_INCL, B_INCR, B_ESC, B_ESP, B_TAB, B_TROCA, B_SLOTS,
+    B_INCL, B_INCR, B_ESC, B_ESP, B_TAB, B_TROCA, B_SLOTS, B_PORTA,
     B_SLOTS_BASE,           /* +0..9: the 1..0 / F1..F10 grid slots */
     B_FX = B_SLOTS_BASE + 10,
     B_MAXID = B_FX + 1,
 };
+#define HUD_NBTN 16  /* base buttons incl. the context-gated PORTA chip */
 
 /* What holding/tapping a button does. */
 enum { K_MOUSE_HOLD, K_MOUSE_TAP, K_KEY_HOLD, K_KEY_TAP, K_GRID };
@@ -67,8 +68,8 @@ enum { K_MOUSE_HOLD, K_MOUSE_TAP, K_KEY_HOLD, K_KEY_TAP, K_GRID };
 enum {
     DIK_ESC = 0x01, DIK_1 = 0x02, DIK_0 = 0x0B, DIK_TAB = 0x0F, DIK_Q = 0x10,
     DIK_W = 0x11, DIK_E = 0x12, DIK_R = 0x13, DIK_A = 0x1E, DIK_S = 0x1F,
-    DIK_D = 0x20, DIK_Z = 0x2C, DIK_X = 0x2D, DIK_C = 0x2E, DIK_SPACE = 0x39,
-    DIK_LSHIFT = 0x2A, DIK_F1 = 0x3B, DIK_DEL = 0xD3,
+    DIK_D = 0x20, DIK_F = 0x21, DIK_Z = 0x2C, DIK_X = 0x2D, DIK_C = 0x2E,
+    DIK_SPACE = 0x39, DIK_LSHIFT = 0x2A, DIK_F1 = 0x3B, DIK_DEL = 0xD3,
 };
 
 typedef struct {
@@ -101,7 +102,7 @@ typedef struct {
     HudCfg cfg;
     Safe safe;
     int w, h;
-    Btn btns[15]; int nbtn;          /* base buttons, laid out for the current size */
+    Btn btns[HUD_NBTN]; int nbtn;    /* base buttons (PORTA is context-gated) */
     Btn grid[11]; int ngrid;         /* slots grid (SLOTS button) */
     float panel[4];                  /* grid panel rect for the tap-outside test */
     int grid_open, grid_page;
@@ -115,6 +116,7 @@ typedef struct {
     float alpha[B_MAXID];            /* eased per-button opacity */
     float fade;                      /* whole-overlay ease-in */
     int ctx_hidden;                  /* 1 = menu/loading: draw nothing, pass touches through */
+    int ctx_door;                    /* 1 = a real door is within the game's own range */
 } TouchState;
 
 /* Buttons are released by id, not by index: the layout can be rebuilt
@@ -349,9 +351,12 @@ static void btn_set(Btn *b, int id, int kind, int dik, int mbtn, const char *lab
 
 /* Base button layout. All rects are computed for a right-handed player and
  * mirrored inside the usable band when cfg->handed is set. The centre of the
- * screen is left free (look zone). */
+ * screen is left free (look zone). B_PORTA is context-gated: it only draws
+ * (and only consumes touches) while a real ASwatDoor is within the game's
+ * own door Range (128 units, PlayerInterface_Use.ini); its action is the
+ * game's contextual F = IssueComplianceOrInteract. */
 static int hud_layout(const HudCfg *cfg, int w, int h, const Safe *s, Btn *out, int maxn) {
-    if (w < 320 || h < 240 || maxn < 15) return 0;
+    if (w < 320 || h < 240 || maxn < HUD_NBTN) return 0;
     float u = hud_unit(cfg, w, h, s);
     float g = 10 * u;
     float xr = w - s->right, yb = h - s->bottom; /* usable right/bottom edges */
@@ -364,6 +369,8 @@ static int hud_layout(const HudCfg *cfg, int w, int h, const Safe *s, Btn *out, 
     btn_set(out + B_CMD, B_CMD, K_MOUSE_HOLD, 0, 1, "CMD", xr - c, out[B_FOGO].y - g - c, c, c);
     btn_set(out + B_SLOTS, B_SLOTS, K_GRID, 0, 0, "SLOTS", xr - sm, out[B_CMD].y - g - sm, sm, sm);
     btn_set(out + B_USAR, B_USAR, K_MOUSE_TAP, 0, 2, "USAR", out[B_FOGO].x - g - us, yb - us, us, us);
+    btn_set(out + B_PORTA, B_PORTA, K_KEY_TAP, DIK_F, -1, "PORTA",
+            out[B_USAR].x, out[B_USAR].y - g - r, r, r);
     btn_set(out + B_REC, B_REC, K_KEY_TAP, DIK_R, -1, "REC", out[B_USAR].x - g - r, yb - r, r, r);
     btn_set(out + B_ZOOM, B_ZOOM, cfg->hold_zoom ? K_KEY_HOLD : K_KEY_TAP, DIK_Z, -1, "ZOOM",
             out[B_REC].x, out[B_REC].y - g - r, r, r);
@@ -382,14 +389,13 @@ static int hud_layout(const HudCfg *cfg, int w, int h, const Safe *s, Btn *out, 
     btn_set(out + B_TROCA, B_TROCA, K_KEY_TAP, DIK_DEL, -1, "TROCA", out[B_ESC].x - g - e, s->top, e, e);
 
     if (cfg->handed) {
-        for (int i = 0; i < 15; i++) {
+        for (int i = 0; i < HUD_NBTN; i++) {
             float d = out[i].x - s->left;
             out[i].x = (w - s->right) - d - out[i].w;
         }
-        zx = (w - s->right) - (zx - s->left) - zw;
     }
     (void)zw;
-    return 15;
+    return HUD_NBTN;
 }
 
 /* The equip grid: 10 slots (1..0 or F1..F10 by page) plus a page button. */
@@ -548,7 +554,7 @@ static void ts_ensure_layout(TouchState *ts, int w, int h, const Safe *s) {
     ts->w = w;
     ts->h = h;
     ts->safe = *s;
-    ts->nbtn = hud_layout(&ts->cfg, w, h, s, ts->btns, 15);
+    ts->nbtn = hud_layout(&ts->cfg, w, h, s, ts->btns, HUD_NBTN);
     ts->ngrid = hud_grid_layout(&ts->cfg, ts->grid_page, w, h, s, ts->grid, 11, ts->panel);
     if (ts->ngrid == 0) ts->grid_open = 0; /* no grid to keep open */
     ts->zone[0] = s->left;
@@ -683,6 +689,9 @@ static void ts_down(TouchState *ts, long fid, float x, float y, int w, int h, ui
     }
 
     int bi = hud_hit(ts->btns, ts->nbtn, x, y);
+    /* B_PORTA is context-gated: with no door nearby it is not a button at
+     * all (the rect belongs to free screen space / look). */
+    if (bi >= 0 && ts->btns[bi].id == B_PORTA && !ts->ctx_door) bi = -1;
     fr->id = fid;
     fr->sector = 0;
     fr->cx = fr->cy = 0;
@@ -911,11 +920,11 @@ int main(void) {
             HudCfg c;
             hud_cfg_defaults(&c);
             c.scale = pass == 0 ? 0.5f : pass == 1 ? 1.0f : 2.0f;
-            Btn bs[15];
-            CHECK(hud_layout(&c, W, H, &s, bs, 15) == 15);
+            Btn bs[HUD_NBTN];
+            CHECK(hud_layout(&c, W, H, &s, bs, HUD_NBTN) == HUD_NBTN);
             float minb = 0.055f * H;
             int okmin = 1, okscr = 1;
-            for (int i = 0; i < 15; i++) {
+            for (int i = 0; i < HUD_NBTN; i++) {
                 if (bs[i].h < minb - 0.5f) okmin = 0;
                 if (!rect_in_screen(&bs[i], W, H)) okscr = 0;
             }
@@ -930,9 +939,11 @@ int main(void) {
         HudCfg c;
         hud_cfg_defaults(&c);
         c.handed = 1;
-        Btn bs[15];
-        hud_layout(&c, W, H, &s, bs, 15);
+        Btn bs[HUD_NBTN];
+        hud_layout(&c, W, H, &s, bs, HUD_NBTN);
         CHECK(bs[B_FOGO].x + bs[B_FOGO].w * 0.5f < W * 0.5f); /* fire moved left */
+        /* the context chip mirrors like every other button */
+        CHECK(bs[B_PORTA].x + bs[B_PORTA].w * 0.5f < W * 0.5f);
     }
 
     /* --- 1. tap on FOGO -> mouse button 0 down, then up --- */
@@ -1413,7 +1424,7 @@ int main(void) {
             hud_cfg_defaults(&c);
             c.scale = pass == 0 ? 0.5f : pass == 1 ? 1.0f : pass == 2 ? 2.0f : 1.0f;
             c.handed = pass == 3;
-            Btn bs[15];
+            Btn bs[HUD_NBTN];
             Safe sr;
             if (pass == 4) { /* a big notch + bars, inside the sanity cap */
                 sr.top = 0.25f * hs[r];
@@ -1422,10 +1433,10 @@ int main(void) {
             } else {
                 hud_safe_defaults(&sr, ws[r], hs[r]);
             }
-            CHECK(hud_layout(&c, ws[r], hs[r], &sr, bs, 15) == 15);
+            CHECK(hud_layout(&c, ws[r], hs[r], &sr, bs, HUD_NBTN) == HUD_NBTN);
             int ok = 1;
-            for (int i = 0; i < 15 && ok; i++)
-                for (int j = i + 1; j < 15 && ok; j++) {
+            for (int i = 0; i < HUD_NBTN && ok; i++)
+                for (int j = i + 1; j < HUD_NBTN && ok; j++) {
                     const Btn *a = &bs[i], *b = &bs[j];
                     if (a->x < b->x + b->w && b->x < a->x + a->w &&
                         a->y < b->y + b->h && b->y < a->y + a->h) ok = 0;
@@ -1439,10 +1450,13 @@ int main(void) {
      * fake one with MAP_NORESERVE so the whole 4 GiB flat space is addressable
      * without actually committing memory. */
     {
-        enum { GOBJ_ADDR = 0x01294354, CLS_ADDR = 0x032AB848 };
-        const uint32_t CLS = 0x2AAA1000;   /* heap: UClass object */
-        const uint32_t PAWN = 0x2BBB2000;  /* heap: ASwatPlayer object */
-        const uint32_t DATA = 0x2CCC3000;  /* heap: the TArray payload */
+        enum { GOBJ_ADDR = 0x01294354, CLS_ADDR = 0x032AB848, CLSDOOR_ADDR = 0x032A6408 };
+        const uint32_t CLS = 0x2AAA1000;      /* heap: UClass object */
+        const uint32_t DOORCLS = 0x2AAA2000;  /* heap: UClass of ASwatDoor */
+        const uint32_t PAWN = 0x2BBB2000;     /* heap: ASwatPlayer object */
+        const uint32_t DOOR1 = 0x2BBB3000;    /* heap: ASwatDoor near the pawn */
+        const uint32_t DOOR2 = 0x2BBB4000;    /* heap: ASwatDoor far away */
+        const uint32_t DATA = 0x2CCC3000;     /* heap: the TArray payload */
         hud_state_reset_for_tests();
         hud_set_scan_interval(50);
 
@@ -1478,14 +1492,27 @@ int main(void) {
             hud_game_tick(1100);
             CHECK(hud_game_ctx() == HUD_CTX_UNKNOWN);
 
-            /* S3: engine live, no pawn -> MENU, HUD hidden and pass-through */
+            /* S3: engine live, no pawn -> MENU, HUD hidden and pass-through.
+             * The array carries 3 strangers + 2 doors (classes are the test's
+             * own stand-ins for the real PrivateStaticClass slots). */
             w32(CLS_ADDR, CLS);
+            w32(CLSDOOR_ADDR, DOORCLS);
             w32(GOBJ_ADDR, DATA);          /* TArray.Data */
-            w32(GOBJ_ADDR + 4, 3);         /* TArray.Num */
+            w32(GOBJ_ADDR + 4, 5);         /* TArray.Num */
             w32(GOBJ_ADDR + 8, 8);         /* TArray.Max */
             w32(DATA + 0, 0x2DDD4000);
             w32(DATA + 4, 0x2EEE5000);
             w32(DATA + 8, 0x2FFF6000);
+            w32(DATA + 12, DOOR1);
+            w32(DATA + 16, DOOR2);
+            w32(DOOR1 + 0x24, DOORCLS);
+            w32(DOOR1 + 0x174, 0x42B40000); /* X = 90.0f: 10 units from the pawn */
+            w32(DOOR1 + 0x178, 0x42C80000); /* Y = 100.0f */
+            w32(DOOR1 + 0x17C, 0x42700000); /* Z = 60.0f */
+            w32(DOOR2 + 0x24, DOORCLS);
+            w32(DOOR2 + 0x174, 0x437F0000); /* X = 510.0f: far */
+            w32(DOOR2 + 0x178, 0x42C80000);
+            w32(DOOR2 + 0x17C, 0x42700000);
             hud_game_tick(1200);
             CHECK(hud_game_ctx() == HUD_CTX_MENU);
             ts_set_context(&ts, 1, 1200);
@@ -1509,6 +1536,25 @@ int main(void) {
             CHECK(loc && loc[0] == 0x42A00000u && loc[2] == 0x42700000u);
             ts_set_context(&ts, 0, 1300);
             CHECK(!ts.ctx_hidden);
+
+            /* S4b: doors collected by the same scan; the near one gates the
+             * PORTA chip, whose tap fires the real F (IssueComplianceOrInteract) */
+            CHECK(hud_door_count() == 2);
+            float d2 = -1.0f;
+            CHECK(hud_door_near(128.0f, &d2) == 1 && d2 == 100.0f); /* 10^2 */
+            ts.ctx_door = hud_door_near(128.0f, NULL); /* what touch_draw does */
+            CHECK(ts.ctx_door);
+            int mx2, my2;
+            vinput_mouse_take(&mx2, &my2);
+            uint32_t ef0 = vinput_key_edges();
+            const Btn *porta = tbtn(&ts, B_PORTA);
+            CHECK(porta != NULL);
+            ts_down(&ts, 4110, porta->x + porta->w / 2, porta->y + porta->h / 2, W, H, 1305);
+            CHECK(vinput_keys()[DIK_F]);                 /* F down (real bind) */
+            ts_up(&ts, 4110);
+            ts_tick(&ts, 1305 + 200);                    /* 120 ms tap window */
+            CHECK(!vinput_keys()[DIK_F]);                /* F released */
+            CHECK(vinput_key_edges() == ef0 + 2);        /* down+up, nothing else */
             vinput_mouse_take(&mx, &my);
             ts_down(&ts, 4102, f->x + f->w / 2, f->y + f->h / 2, W, H, 1300);
             CHECK((vinput_mouse_buttons() & 1u) != 0); /* mission: tap works */
@@ -1527,6 +1573,23 @@ int main(void) {
             w32(PAWN + 0x24, 0);           /* object dies: Class nulled */
             hud_game_tick(1501);           /* validation runs every tick */
             CHECK(hud_game_ctx() == HUD_CTX_MENU);
+
+            /* S8: walking away from every door closes the chip without a
+             * rescan (per-tick Location refresh) and the spot turns into a
+             * look finger again */
+            w32(PAWN + 0x24, CLS);         /* pawn alive again */
+            hud_game_tick(1600);
+            CHECK(hud_game_ctx() == HUD_CTX_MISSION);
+            CHECK(hud_door_near(128.0f, NULL) == 1);   /* still near */
+            w32(PAWN + 0x174, 0x447A0000); /* X = 1000.0f: out of every door */
+            hud_game_tick(1601);           /* location refresh needs no scan */
+            CHECK(hud_door_near(128.0f, NULL) == 0);
+            ts.ctx_door = 0;
+            uint32_t ef1 = vinput_key_edges();
+            ts_down(&ts, 4111, porta->x + porta->w / 2, porta->y + porta->h / 2, W, H, 1602);
+            CHECK(!vinput_keys()[DIK_F]);  /* chip off: no key */
+            CHECK(finger_find(&ts, 4111) && finger_find(&ts, 4111)->role == R_LOOK);
+            CHECK(vinput_key_edges() == ef1);
 
             /* S7: flip to hidden releases held keys exactly once */
             w32(PAWN + 0x24, CLS);
@@ -1710,10 +1773,13 @@ static void build_frame(TouchState *ts) {
     for (int i = 0; i < ts->nbtn; i++) {
         const Btn *b = &ts->btns[i];
         int pressed = btn_pressed(ts, b->id);
-        float target = pressed ? 1.0f : ts->cfg.opacity;
+        /* context-gated buttons ease to fully transparent when off */
+        int gate = b->id != B_PORTA || ts->ctx_door;
+        float target = pressed ? 1.0f : (gate ? ts->cfg.opacity : 0.0f);
         float a = ease_to(ts->alpha[b->id], target, 16.7f);
         ts->alpha[b->id] = a;
         a *= fade;
+        if (a < 0.004f) continue; /* invisible: skip the quads entirely */
         uint32_t fill = shade(pressed ? (b->id == B_FOGO ? 0xa03028 : 0x4a78b4) : 0x2a323c,
                               pressed ? maxf(a, 0.85f) : a);
         uint32_t border = shade(b->id == B_FOGO ? 0xc06050 : 0x7890a8, maxf(a, 0.5f));
@@ -1981,7 +2047,8 @@ extern "C" void touch_draw(void *dev) {
     /* one log line per menu->mission flip (loading always passes through
      * MENU, so every real mission start is covered) */
     if (!hidden && ctx == HUD_CTX_MISSION && g_ts.ctx_hidden)
-        OLOG("overlay: mission pawn=%08x", hud_pawn());
+        OLOG("overlay: mission pawn=%08x doors=%d", hud_pawn(), hud_door_count());
+    g_ts.ctx_door = hud_door_near(128.0f, NULL); /* game's own door Range */
     ts_set_context(&g_ts, hidden, now);
 
     ts_tick(&g_ts, now);

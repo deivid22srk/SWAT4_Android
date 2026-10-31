@@ -63,9 +63,9 @@ pode lê-lo em vez de reimplementar as regras.
 
 | # | Contexto | Viabilidade | Base técnica real | Falta |
 |---|---|---|---|---|
-| 1 | Andando/explorando (HUD mínimo) | **Feito** (etapa 1) | overlay com stick/look/15 botões reais | — |
+| 1 | Andando/explorando (HUD mínimo) | **Feito** (etapa 1) | overlay com stick/look/16 botões reais (15 fixos + 1 contextual) | — |
 | 2 | Missão carregada vs menu/loading | **Feito** (etapa 2) | procurar `ASwatPlayer` em `GObjObjects` (classe exata) | confirmação em aparelho (próximo log) |
-| 3 | Perto de porta | **Viável** | `ASwatDoor` instances + `Location@+0x174` + distância ao pawn | nada — etapa 3 |
+| 3 | Perto de porta | **Feito** (etapa 3) | `ASwatDoor` instances + `Location@+0x174` + distância ao pawn, Range=128 do próprio jogo | confirmação em aparelho |
 | 4 | Estado da porta (fechada/trancada/cedida) | **Parcial** | campos de estado do `ASwatDoor` precisam ser pinados (RE dirigido nos accessors exportados, ex. `?IsOpen`/beliefs) | RE + validação em aparelho |
 | 5 | Menu de porta (ações por tecla) | **Parcial** | abrir o menu é real (`F`/`Interact`); o mapeamento das opções do menu por tecla precisa de confirmação (RE no `UseInterface`/script) | RE |
 | 6 | Suspeito/civil focado | **Parcial→Viável** | instâncias de pawn inimigo/civil por `PrivateStaticClass` (exports existem para `ASwatEnemy`/`ASwatHostage`); ações reais = `F` (compliance/interact) + `G` (grab) | pinar `IsArrested`/estado (export `?IsArrested@ASwatPawn@@UAEHXZ` chamável via `rt_invoke`) |
