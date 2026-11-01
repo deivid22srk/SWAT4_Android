@@ -1258,3 +1258,69 @@ virtual empacotado).
   botão em menu entregam WM_MOUSEMOVE/LBUTTONDOWN/LBUTTONUP + espelho DI,
   dedupe de borda, contexto de missão não gera WM, cursor não colocado não
   gera WM, EV_MENUCLICK e botão 0 compartilham a mesma borda.
+
+## 2026-11-01 — Causa raiz do "só o Esq funciona": o mouse do motor só
+existe no stream bufferizado do DirectInput (agora implementado)
+
+### O que o vídeo screen-20261031-205831 mostra
+
+18 s no menu principal: o cursor do jogo fica parado, as dicas dos itens
+mudam de posição (navegação por setas do stick — teclado WM funciona) e
+nenhum toque em botão do HUD produz reação. O usuário perguntou: "se tiver
+suporte a xinput ou dinput, melhor mudar para virtual gamepad".
+
+### Investigação no código recompilado do jogo (gen/)
+
+* `DirectInput8Create` aparece **uma** vez no log de campo (iutlog) e o shim
+  registrou **"DirectInput: created mouse"** — nenhum dispositivo DI de
+  teclado foi criado.
+* windrv recompilado (`upload/gen/windrv_00.c`): o poll de input do motor
+  (1) lê o teclado do array de estado preenchido por WM_KEYDOWN/UP (loop de
+  256 entradas -> `f_21011D6`), e (2) lê o **mouse exclusivamente** do
+  stream bufferizado: `GetDeviceData(20, &um, &count, 0)` em laço com
+  re-Acquire, cada evento -> `f_21010E1(dwOfs, dwData)` que mapeia
+  DIMOFS_X/Y (0/4) para os eixos e DIMOFS_BUTTON0..2 (12..14) para
+  IK_LeftMouse/IK_RightMouse/IK_MiddleMouse. Não há GetDeviceState do
+  dispositivo mouse (a única chamada +0x24 é a do teclado, 0x110 bytes).
+* Nosso `dev_GetDeviceData` só implementava dados bufferizados de
+  **teclado**: o dispositivo mouse devolvia **zero eventos** para sempre.
+  Resultado: teclado OK (stick/setas navegam menus), mouse morto em todos
+  os contextos — exatamente "só o Esq funciona".
+* XInput: `SWAT4.exe` (2005) não importa XINPUT1_3.dll — nenhuma
+  LoadLibrary de XINPUT no log de campo. Os shims XInput existentes
+  (input.c) são para outros jogos do runtime. Virtual gamepad via XInput
+  seria invisível para este jogo; via DInput joystick o motor enumera pads
+  mas só cria teclado/mouse, e os menus do SWAT 4 são mouse/teclado.
+  **Conclusão: o caminho nativo correto é o mouse DI bufferizado** — que é
+  o que os menus realmente consomem.
+
+### Correções
+
+1. `runtime/dinput.c` — `dev_GetDeviceData` do mouse: stream bufferizado
+   real (FIFO por dispositivo): bordas de botão 0x80/0x00 em
+   DIMOFS_BUTTON0..2 = 12..14, deltas relativos coalescidos em DIMOFS_X/Y =
+   0/4, carimbos SDL_GetTicks e sequência; cap respeitado (o laço do motor
+   pede 1 evento por chamada); DIGDD_PEEK enxerga mas não drena; absorção
+   de transições acontece a cada chamada (um dispositivo real registra
+   quando acontecem). Log único "DI mouse buffered: first event ofs=…"
+   para o próximo log de campo provar o canal.
+2. `runtime/dinput.c` — `dev_GetDeviceState` do mouse: só botões; deltas
+   zerados e **sem consumir** `vinput_mouse_take` (o único consumidor dos
+   deltas agora é o stream bufferizado; consumir nos dois roubava eventos).
+3. `runtime/vinput.c` — `vinput_mouse_button` em contexto de menu: um
+   clique **antes** de qualquer movimento do dedo de menu posiciona o
+   cursor no centro do guest (um mouse real está sempre em algum lugar) em
+   vez de descartar o clique (s_cur_y<0 derrubava os primeiros toques).
+
+### Validação local
+
+* `sh scripts/test_hud.sh` — tudo verde, agora incluindo o teste
+  comportamental `scripts/behave/vinput_behav.c` (11 blocos): toque de menu
+  cai no centro quando o cursor nunca foi colocado; dedupe de bordas; move
+  de menu = WM_MOUSEMOVE absoluto com dedupe; missão = só DI; tecla =
+  estado DIK + WM na fila; filme aberto = WM direto no WndProc; stream DI:
+  bordas 12: 0x80->0x00, deltas coalescidos 0/4 com sinal, ordem FIFO sob
+  cap=1, PEEK enxerga sem drenar, GetDeviceState não rouba deltas.
+* Os shims de janela/mouse (WM pair) continuam como estavam: um mouse real
+  entrega WM **e** DI — o motor trata os dois (Press duplicado no mesmo
+  tick é no-op no estado de input).

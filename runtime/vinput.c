@@ -54,12 +54,23 @@ void vinput_mouse_button(int btn0a2, int down) {
      * screen-20261031-183211: every HUD button dead at the main menu).
      * Button 0 shares the menu-button edge state so the WM pair stays
      * consistent with EV_MENUCLICK; buttons 1/2 post their own WM pair.
-     * The WM is only posted once the cursor has a real position
-     * (s_cur_y >= 0): a click without a placed cursor would land at 0,0
-     * or pack 0xFFFF. Missions stay DI-only: the WM click would
-     * double-fire IK_LeftMouse next to the polled device state. */
+     * A click before the first menu-finger move still gets a real place
+     * to land: the guest screen center — a real mouse is always
+     * somewhere, and dropping the click made first taps disappear (field
+     * video screen-20261031-205831: only the stick did anything).
+     * Missions stay DI-only: the WM click would double-fire IK_LeftMouse
+     * next to the polled device state. */
     extern int hud_game_ctx(void);
-    if (hud_game_ctx() != 2 /* HUD_CTX_MISSION */ && s_cur_y >= 0) {
+    if (hud_game_ctx() != 2 /* HUD_CTX_MISSION */) {
+        if (s_cur_y < 0) {
+            extern void user32_get_screen(int *w, int *h);
+            int w, h;
+            user32_get_screen(&w, &h);
+            if (w > 0 && h > 0) {
+                s_cur_x = w / 2;
+                s_cur_y = h / 2;
+            }
+        }
         static const uint32_t down_msg[3] = {0x201, 0x204, 0x207}; /* L/R/M */
         static const uint32_t up_msg[3]   = {0x202, 0x205, 0x208};
         static const uint32_t mk_flag[3]  = {0x0001, 0x0002, 0x0010};

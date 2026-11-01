@@ -52,3 +52,6 @@ if nm -u /tmp/chk_hs.o | grep -q '_Z.*vinput'; then
     exit 1
 fi
 echo "vinput symbols referenced as plain C: ok"
+
+echo "== behavioral test: vinput menu/mission taps + dinput buffered mouse stream"
+sh scripts/behave/run.sh

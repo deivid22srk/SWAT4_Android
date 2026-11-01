@@ -14,7 +14,32 @@ static const uint8_t GUID_SysKeyboard[16] = {0x61, 0x2B, 0x1D, 0x6F, 0xA0, 0xD5,
                                              0xBF, 0xC7, 0x44, 0x45, 0x53, 0x54, 0x00, 0x00};
 
 enum { DEV_KEYBOARD, DEV_MOUSE };
-typedef struct { int kind; uint8_t prev[256]; uint32_t seq; } DIDev;
+typedef struct {
+    int kind;
+    uint8_t prev[256];
+    uint32_t seq;
+    /* Buffered mouse stream (DEV_MOUSE only). UE2.5's udxinput reads the
+     * mouse ONLY here: the windrv poll calls GetDeviceData(20, &one,
+     * &count, 0) in a loop and turns every event into a key event via
+     * dwOfs (0/4 axes, 12..14 buttons) — the keyboard comes from the WM
+     * key array instead (that is why stick arrows worked while every
+     * mouse click was dead: this stream returned zero events). The FIFO
+     * keeps events the guest has not read yet (it reads one per call). */
+    uint8_t mbtn_prev[3];          /* last reported button state */
+    int32_t pend_dx, pend_dy;      /* deltas not yet emitted */
+    uint8_t mev_ofs[32];           /* pending DIMOFS_* offsets */
+    uint32_t mev_data[32];         /* pending dwData values */
+    uint8_t mev_n;                 /* FIFO length */
+    uint8_t logged_first;          /* one-shot field diagnostic */
+} DIDev;
+
+/* Append one buffered mouse event (DIDEVICEOBJECTDATA offset + data). */
+static void mouse_push(DIDev *d, uint32_t ofs, uint32_t data) {
+    if (d->mev_n >= sizeof d->mev_ofs) return; /* drop oldest would be worse */
+    d->mev_ofs[d->mev_n] = (uint8_t)ofs;
+    d->mev_data[d->mev_n] = data;
+    d->mev_n++;
+}
 
 static HComClass k_di8, k_didev;
 
@@ -101,18 +126,15 @@ SHIM(dev_GetDeviceState) {
         for (int k = 0; k < 256 && k < (int)n; k++)
             if (vks[k]) M8(p + k) = 0x80;
     } else {
-        /* SDL relative mouse + what the touch overlay accumulated since the
-         * last poll (deltas and buttons). The Z axis stays 0: SWAT 4's
-         * DefUser.ini binds weapons to 1-0/F1-F10, not to a mouse wheel. */
-        int x, y, vx, vy;
-        Uint32 b = SDL_GetRelativeMouseState(&x, &y);
-        vinput_mouse_take(&vx, &vy);
-        M32(p) = (uint32_t)(x + vx);
-        M32(p + 4) = (uint32_t)(y + vy);
-        M32(p + 8) = 0;
+        /* Buttons only, deltas stay 0: the engine's mouse channel is the
+         * buffered stream below (udxinput's GetDeviceData poll loop — the
+         * only GetDeviceState this engine calls is the keyboard's 0x110
+         * one). Consuming deltas here would steal them from the buffered
+         * events. The Z axis stays 0: SWAT 4's DefUser.ini binds weapons
+         * to 1-0/F1-F10, not to a mouse wheel. */
         uint32_t vb = vinput_mouse_buttons();
         for (int i = 0; i < 3 && 12 + (uint32_t)i < n; i++)
-            M8(p + 12 + i) = ((b & SDL_BUTTON(i + 1)) || (vb & (1u << i))) ? 0x80 : 0;
+            M8(p + 12 + i) = (vb & (1u << i)) ? 0x80 : 0;
     }
     RET(0, 3);
 }
@@ -149,6 +171,55 @@ SHIM(dev_GetDeviceData) {
             }
             if (!(flags & 1)) d->prev[k] = cur[k]; /* DIGDD_PEEK leaves the buffer */
             n++;
+        }
+    } else if (d->kind == DEV_MOUSE) {
+        /* The mouse as a real one would stream it: coalesced relative
+         * deltas (DIMOFS_X=0, DIMOFS_Y=4) and 0x80/0x00 button edges
+         * (DIMOFS_BUTTON0..2 = 12..14). Absorbing happens on every call
+         * (a real device records transitions as they happen — DIGDD_PEEK
+         * must see them too); only the drain is skipped on PEEK. The
+         * touch overlay's deltas and buttons arrive through vinput
+         * exactly like the SDL mouse. */
+        int dx, dy, vx, vy;
+        Uint32 b = SDL_GetRelativeMouseState(&dx, &dy);
+        (void)b;
+        vinput_mouse_take(&vx, &vy);
+        d->pend_dx += dx + vx;
+        d->pend_dy += dy + vy;
+        uint32_t vb = vinput_mouse_buttons();
+        for (int i = 0; i < 3; i++) {
+            uint32_t cur = (vb >> i) & 1u;
+            if (cur != d->mbtn_prev[i]) {
+                mouse_push(d, 12 + (uint32_t)i, cur ? 0x80u : 0u);
+                d->mbtn_prev[i] = (uint8_t)cur;
+            }
+        }
+        if (d->pend_dx) { mouse_push(d, 0, (uint32_t)d->pend_dx); d->pend_dx = 0; }
+        if (d->pend_dy) { mouse_push(d, 4, (uint32_t)d->pend_dy); d->pend_dy = 0; }
+    }
+    if (d->kind == DEV_MOUSE && buf && sz >= 16) {
+        /* PEEK serves each buffered event once per call (a real device
+         * enumerates the buffer without draining it); non-peek drains. */
+        uint32_t limit = (flags & 1) ? d->mev_n : cap;
+        for (; d->mev_n && n < limit && n < cap; n++) {
+            uint32_t e = buf + n * sz;
+            memset(MEM + e, 0, sz);
+            M32(e) = d->mev_ofs[0];
+            M32(e + 4) = d->mev_data[0];
+            M32(e + 8) = SDL_GetTicks();
+            M32(e + 12) = ++d->seq;
+            if (!d->logged_first) {
+                d->logged_first = 1;
+                LOG("DI mouse buffered: first event ofs=%u data=%04x",
+                    d->mev_ofs[0], d->mev_data[0]);
+            }
+            if (!(flags & 1)) { /* DIGDD_PEEK reads without draining */
+                d->mev_n--;
+                for (int i = 0; i < d->mev_n; i++) { /* pop front (32 entries max) */
+                    d->mev_ofs[i] = d->mev_ofs[i + 1];
+                    d->mev_data[i] = d->mev_data[i + 1];
+                }
+            }
         }
     }
     if (pn) M32(pn) = n;
