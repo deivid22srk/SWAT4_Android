@@ -202,6 +202,13 @@ texto quando um PNG não existir; 0 desenha as caixas vazias);
 `hold_zoom` (AGACH/ZOOM enviam toque de 120 ms por padrão, o modo toggle do
 jogo; mude para 1 se o seu User.ini usar agachar/zoom por pressionar).
 
+O botão de **olho** no topo central (fora do espelhamento de canhoto) oculta
+todo o HUD — analógico, botões e grade — para ver o jogo limpo; um olho
+cortado fica no lugar e traz tudo de volta com um toque. É um toggle de
+sessão: o HUD sempre volta visível ao reabrir o jogo. Com o HUD oculto, cada
+dedo livre se comporta como se ele não existisse (olhar na missão, mouse do
+jogo nos menus, ESC nos vídeos de abertura).
+
 ## Troubleshooting
 
 * `port/log.txt` é reescrito a cada execução; `port/last_exit.txt` sobrevive.

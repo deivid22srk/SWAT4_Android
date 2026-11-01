@@ -1,4 +1,6 @@
-# Manifesto dos ícones HUD do SWAT 4 Android
+# Manifesto dos ícones HUD gerados por IA
+
+Pacote regenerado usando modelo de geração de imagens, com direção de arte tática consistente para HUD contextual do SWAT 4 Android.
 
 O prompt original informa 36 PNGs, mas a tabela especifica 42 arquivos. Este pacote segue a tabela completa: 42 PNGs + este manifesto + o prompt original.
 

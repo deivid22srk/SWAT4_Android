@@ -1654,3 +1654,57 @@ em um Pc" + "sinto falta daqueles botões cima baixo esquerda e direita no hud".
   mudar o comportamento (o parse passa a ter os dados que o jogo espera).
 * O "carregando infinito" e o "fecha" são o mesmo escritor: com o trap, os
   dois casos terminam no mesmo dump nomeado.
+
+## 2026-11-01 — Ícones novos (2swat4-hud-icons.zip) + layout mais confortável + botão de ocultar
+
+Pacote do usuário com os 42 PNGs regenerados (mesmos nomes, arte nova):
+validados com `scripts/check_icons2.py` (IHDR/alpha/borda transparente/
+conteúdo; 42 ok), normalização determinística de borda (alpha=0 nos 2 px
+externos + feather no anel 3 — 9 PNGs tinham artefatos de borda da geração)
+e contact sheet inspecionado. `assets/hudicons/` atualizado; o fallback
+`<game>/hudicons/*.png` e a degradação por botão continuam.
+
+Layout redesenhado (tudo em unidades u, como antes):
+
+* Agrupamento direito em quatro colunas alinhadas que leem como um bloco:
+  FOGO 150 / CMD 100 / SLOTS 64 (alinhados à direita), USAR 90 com PORTA 72
+  centrado em cima, e as colunas REC/ZOOM/MODO e AGACH/CORRER (72 cada).
+* Barra de topo à direita com os quatro botões "meta" (ESP/TAB + TROCA/ESC,
+  64 cada) — linha única que o polegar nunca descansa em cima; o canto
+  superior esquerdo fica livre.
+* SLOTS/TAB/ESP/D-pad sobem de 56u para 64u (alvos maiores); zona do
+  analógico de 0,38h para 0,34h (D-pad e INCL/INCR mais baixos, ao alcance
+  real do polegar).
+* Feedback de pressionado agora na cor âmbar do conjunto de ícones
+  (#E8A33D); PORTA mantém o acento azul perto de porta.
+
+Botão de ocultar (pedido do usuário): chip de olho no topo CENTRO, fora do
+espelhamento de canhoto e fora do arco de descanso dos polegares. Um toque
+colapsa TODO o HUD (analógico, botões, grade) e deixa só um olho cortado;
+outro toque traz de volta. Toggle só de sessão (nunca persistido: o HUD
+nunca volta oculto após reabrir). Oculto, cada dedo livre se comporta como
+se o HUD não existisse. `releaseAll()` antes de ocultar solta qualquer
+botão pressionado; o dedo do chip é reivindicado como papel consumido para
+o UP não vazar. Zero alocação por frame mantido (glifo do olho é
+reconstruído só no relayout).
+
+### Crash da Carreira (shhxpott) — contenção alargada
+
+O log do usuário mostrou duas corrupções com a mesma assinatura: os buffers
+de parse do Havok de 19952 bytes escrevem ~90 bytes além do fim e o
+arredondamento de 64 bytes deixava só 8 bytes de folga quando (HDR+n) já era
+alinhado — o header vizinho era esmagado duas vezes e o load morreu no
+vtable NULL do objeto ferido. O arredondamento agora GARANTE slack mínimo:
+192 bytes + cauda de 16 para n>=4096 (absorve ~200 bytes, 2x o overrun
+observado), 48+cauda para a classe 512..4095 (o bug da fórmula
+`round_up(...)+TAIL` — slack colapsar a zero quando o tamanho já é múltiplo
+— foi pego pelo cenário novo antes de virar build).
+
+### Validação
+
+* `sh tools/test_heap.sh`: ALL PASS (1039 ok, 0 falhas).
+* `tools/heap_overrun_scenario.c` (novo): overrun de 90B e de 150B num bloco
+  de 19952 absorvidos, vizinho intacto, churn 100x limpo.
+* `sh scripts/test_hud.sh`: rc=0 (vinput/dinput/hud intatos).
+* ecj 3.33 + android-all API 33 (Robolectric, java/javax removidos): árvore
+  Java completa (io + org.libsdl) compila com 0 erros.

@@ -34,7 +34,11 @@ import java.io.InputStream;
  * instead of appearing only under a dragged finger.
  *
  * The FULL HUD is always visible and always active, in EVERY context —
- * user requirement: "todos os botões mostrados a todo tempo". The stick
+ * user requirement: "todos os botões mostrados a todo tempo" — with one
+ * deliberate escape: the eye chip at the top-center edge collapses the
+ * whole HUD on demand ("coloque um botão onde permite ocultar") and a
+ * slashed eye brings it back; the toggle is session-only, never saved.
+ * While up, the stick
  * and every button, PORTA and ESC included, draw through missions, menus,
  * Bink movies and loading frames alike, and every one of them works
  * anywhere. What the REAL game state (HudBridge.poll -> hud_state.cpp
@@ -110,7 +114,7 @@ public class HudOverlay extends View {
     private static final Btn[] BASE = {
             new Btn(B_FOGO, K_MHOLD, 0, 0, "FOGO", 150),
             new Btn(B_CMD, K_MHOLD, 0, 1, "CMD", 100),
-            new Btn(B_SLOTS, K_GRID, 0, -1, "SLOTS", 56),
+            new Btn(B_SLOTS, K_GRID, 0, -1, "SLOTS", 64),
             new Btn(B_USAR, K_MTAP, 0, 2, "USAR", 90),
             new Btn(B_PORTA, K_KTAP, DIK_F, -1, "PORTA", 72),   /* door-gated */
             new Btn(B_REC, K_KTAP, DIK_R, -1, "REC", 72),
@@ -120,8 +124,8 @@ public class HudOverlay extends View {
             new Btn(B_CORRER, K_KHOLD, DIK_LSHIFT, -1, "CORRER", 72),
             new Btn(B_INCL, K_KHOLD, DIK_Q, -1, "INC<", 72),
             new Btn(B_INCR, K_KHOLD, DIK_E, -1, "INC>", 72),
-            new Btn(B_TAB, K_KTAP, DIK_TAB, -1, "TAB", 56),
-            new Btn(B_ESP, K_KTAP, DIK_SPACE, -1, "ESP", 56),
+            new Btn(B_TAB, K_KTAP, DIK_TAB, -1, "TAB", 64),
+            new Btn(B_ESP, K_KTAP, DIK_SPACE, -1, "ESP", 64),
             new Btn(B_ESC, K_KTAP, DIK_ESC, -1, "ESC", 64),
             new Btn(B_TROCA, K_KTAP, DIK_DEL, -1, "TROCA", 64),
             new Btn(B_UP, K_ARROW, DIK_UP, -1, null, 56),
@@ -181,6 +185,18 @@ public class HudOverlay extends View {
     private boolean everMenu;
     private int guestW, guestH;             /* guest client px (menu mapping) */
     private long menuArrowRepAt;            /* menu stick repeat deadline */
+
+    /* ---- visibility chip (session toggle, never persisted: the HUD must
+     * never come back from a reboot already hidden) ----
+     * One small eye-shaped chip, top-center, outside the handed mirror and
+     * out of every thumb's resting arc. Tapping it collapses the whole HUD
+     * (stick, buttons, grid) to watch the game clean; a slashed eye stays
+     * behind to bring it all back. While hidden every free finger behaves
+     * exactly as if the HUD did not exist: look in missions, the game's
+     * mouse in menus, the skip key on boot movies. */
+    private boolean hidden;
+    private float chipX, chipY, chipSz;
+    private final Path chipEye = new Path();
 
     /* pending 120 ms tap auto-releases (preallocated table) */
     private final int[] pendTarget = new int[16];
@@ -435,11 +451,15 @@ public class HudOverlay extends View {
         float f = bsz[B_FOGO], c = bsz[B_CMD], sm = bsz[B_SLOTS], r = bsz[B_REC],
                 us = bsz[B_USAR], e = bsz[B_ESC];
 
+        /* Right combat cluster: four aligned columns that read as one
+         * block. FOGO stays the biggest target in the right thumb arc;
+         * reload/use are one thumb-roll away; the rare toggles stack
+         * upward; PORTA nests centered over USAR. */
         bx[B_FOGO] = xr - f; by[B_FOGO] = yb - f;
         bx[B_CMD] = xr - c; by[B_CMD] = by[B_FOGO] - g - c;
         bx[B_SLOTS] = xr - sm; by[B_SLOTS] = by[B_CMD] - g - sm;
         bx[B_USAR] = bx[B_FOGO] - g - us; by[B_USAR] = yb - us;
-        bx[B_PORTA] = bx[B_USAR]; by[B_PORTA] = by[B_USAR] - g - r;
+        bx[B_PORTA] = bx[B_USAR] + (us - r) * 0.5f; by[B_PORTA] = by[B_USAR] - g - r;
         bx[B_REC] = bx[B_USAR] - g - r; by[B_REC] = yb - r;
         bx[B_ZOOM] = bx[B_REC]; by[B_ZOOM] = by[B_REC] - g - r;
         bx[B_MODO] = bx[B_REC]; by[B_MODO] = by[B_ZOOM] - g - r;
@@ -447,13 +467,17 @@ public class HudOverlay extends View {
         bx[B_CORRER] = bx[B_AGACH]; by[B_CORRER] = by[B_AGACH] - g - r;
 
         zoneL = safeLeft; zoneR = zoneL + 0.30f * w;
-        zoneB = yb; zoneT = zoneB - 0.38f * h;
+        zoneB = yb; zoneT = zoneB - 0.34f * h;
         bx[B_INCL] = zoneL + 4 * u; by[B_INCL] = zoneT - g - r;
         bx[B_INCR] = bx[B_INCL] + r + g; by[B_INCR] = by[B_INCL];
-        bx[B_TAB] = xr - sm; by[B_TAB] = by[B_SLOTS] - g - sm;
-        bx[B_ESP] = bx[B_TAB] - g - sm; by[B_ESP] = by[B_TAB];
+
+        /* Top bar, right-aligned: order-cycle + system buttons in one tidy
+         * row the thumb never rests on; the top-left corner stays free for
+         * the visibility chip. */
         bx[B_ESC] = xr - e; by[B_ESC] = safeTop;
         bx[B_TROCA] = bx[B_ESC] - g - e; by[B_TROCA] = safeTop;
+        bx[B_TAB] = bx[B_TROCA] - 2 * g - sm; by[B_TAB] = safeTop;
+        bx[B_ESP] = bx[B_TAB] - g - sm; by[B_ESP] = safeTop;
 
         /* D-pad cluster: the keyboard's arrow keys, plus-shaped, above the
          * lean buttons — menus navigate with real arrow keys, and the
@@ -461,9 +485,9 @@ public class HudOverlay extends View {
          * X comes from the UNMIRRORED stick-zone center (anchorX is only
          * assigned after that mirror), so the mirror lands the cluster
          * exactly on the mirrored stick anchor. The cluster shrinks before
-         * it can clip above the screen: at scale 2.0 the naive 56u buttons
+         * it can clip above the screen: at scale 2.0 the naive 64u buttons
          * pushed B_UP past y<0 (critic r1: unreachable and untouchable). */
-        float dp = 56 * u;
+        float dp = 64 * u;
         float span = by[B_INCL] - g - safeTop;  /* vertical room below the INC row */
         if (3 * dp + 2 * g > span) dp = Math.max(1f, (span - 2 * g) / 3f);
         bsz[B_UP] = bsz[B_DOWN] = bsz[B_LEFT] = bsz[B_RIGHT] = dp;
@@ -489,6 +513,18 @@ public class HudOverlay extends View {
         stickDead = 0.18f * stickR;
         anchorX = (zoneL + zoneR) * 0.5f;
         anchorY = zoneB - stickR - 14 * u;
+
+        /* Visibility chip: absolute top-center, deliberately OUTSIDE the
+         * handed mirror (the mirrored top bar would collide with it on the
+         * other side) and out of every thumb's resting arc. The eye glyph
+         * is rebuilt here so onDraw only strokes it. */
+        chipSz = 44 * u;
+        chipX = safeLeft + (w - safeLeft - safeRight - chipSz) * 0.5f;
+        chipY = safeTop;
+        chipEye.reset();
+        chipEye.addOval(chipX + chipSz * 0.18f, chipY + chipSz * 0.30f,
+                chipX + chipSz * 0.82f, chipY + chipSz * 0.70f,
+                Path.Direction.CW);
 
         /* chevron glyphs for the four D-pad buttons: rebuilt here, after
          * the handed mirror changed bx[], so they always track the final
@@ -714,14 +750,29 @@ public class HudOverlay extends View {
         p.ly = y;
 
         /* buttons live in EVERY context (always visible, always active):
-         * hit test first, then the grid, then the stick zone; a free
-         * finger looks around in missions and is the game's own mouse in
-         * menus, movies and boot. */
-        int bi = hitBase(x, y);
+         * the visibility chip wins first, then the buttons, the grid, the
+         * stick zone; a free finger looks around in missions and is the
+         * game's own mouse in menus, movies and boot. While hidden the
+         * chip is the ONLY control: everything else falls through. */
+        if (hitChip(x, y)) {
+            boolean wantHidden = !hidden;
+            releaseAll();  /* drop every hold before the controls vanish */
+            hidden = wantHidden;
+            /* releaseAll wiped the pointer slots: re-claim this finger so
+             * its UP event lands on a consumed, harmless role */
+            p = null;
+            for (Ptr q : ptrs) {
+                if (q.role == R_NONE) { p = q; break; }
+            }
+            if (p != null) { p.id = id; p.role = R_BTN; p.btn = -1; }
+            invalidate();
+            return;
+        }
+        int bi = hidden ? -1 : hitBase(x, y);
         if (bi >= 0) {
             p.role = R_BTN;
             pressBtn(p, bi);
-        } else if (gridOpen) {
+        } else if (!hidden && gridOpen) {
             int gi = hitGrid(x, y);
             p.role = R_BTN;
             p.btn = -1;
@@ -732,7 +783,7 @@ public class HudOverlay extends View {
                 invalidate();
             }
             /* gi == -2: inside the panel between slots: consume, do nothing */
-        } else if (inZone(x, y)) {
+        } else if (!hidden && inZone(x, y)) {
             if (stickHeld) {
                 p.role = R_BTN;   /* second stick finger: consumed */
                 p.btn = -1;
@@ -938,6 +989,11 @@ public class HudOverlay extends View {
         return -1;
     }
 
+    private boolean hitChip(float x, float y) {
+        return chipSz > 0 && x >= chipX && x < chipX + chipSz
+                && y >= chipY && y < chipY + chipSz;
+    }
+
     private int hitGrid(float x, float y) {
         if (x < panel[0] || y < panel[1] || x >= panel[0] + panel[2] || y >= panel[1] + panel[3])
             return -1; /* outside the panel */
@@ -1024,6 +1080,12 @@ public class HudOverlay extends View {
         super.onDraw(canvas);
         int alpha = (int) (255 * cfgOpacity);
 
+        /* hidden: the slashed eye is the ONLY thing on screen */
+        if (hidden) {
+            drawChip(canvas, alpha, true);
+            return;
+        }
+
         /* stick: fixed anchor, visible in EVERY context (ghost knob when
          * idle); in missions it moves, in menus it navigates */
         float lw = Math.max(2f, u * 1.2f);
@@ -1052,17 +1114,44 @@ public class HudOverlay extends View {
             canvas.drawPath(chev[i - B_UP], pStroke);
         }
         if (gridOpen) drawGrid(canvas, alpha);
+        drawChip(canvas, alpha, false);
+    }
+
+    /** The visibility chip: an amber-eyed eye while the HUD is up, a
+     * slashed eye once hidden. Same shell style as the buttons, slightly
+     * dimmer so it never shouts. */
+    private void drawChip(Canvas c, int alpha, boolean slashed) {
+        float s = chipSz;
+        rf.set(chipX, chipY, chipX + s, chipY + s);
+        pFill.setColor(Color.argb(alpha * 2 / 3, 12, 16, 22));
+        c.drawRoundRect(rf, s * 0.3f, s * 0.3f, pFill);
+        pStroke.setStrokeWidth(Math.max(2f, u * 1.2f));
+        pStroke.setColor(Color.argb(slashed ? Math.min(255, alpha + 80) : alpha,
+                255, 255, 255));
+        c.drawRoundRect(rf, s * 0.3f, s * 0.3f, pStroke);
+        int ea = Math.min(255, alpha + 40);
+        pStroke.setStrokeWidth(Math.max(2f, s * 0.09f));
+        pStroke.setColor(Color.argb(ea, 255, 255, 255));
+        c.drawPath(chipEye, pStroke);
+        pCircle.setColor(Color.argb(ea, 232, 163, 61));
+        c.drawCircle(chipX + s * 0.5f, chipY + s * 0.5f, s * 0.10f, pCircle);
+        if (slashed) {
+            c.drawLine(chipX + s * 0.26f, chipY + s * 0.74f,
+                    chipX + s * 0.74f, chipY + s * 0.26f, pStroke);
+        }
     }
 
     private void drawBtn(Canvas c, Bitmap icon, String label, float x, float y,
                          float sz, boolean down, boolean accent, int alpha) {
         rf.set(x, y, x + sz, y + sz);
         float rad = sz * 0.24f;
-        pFill.setColor(down ? Color.argb(Math.min(255, alpha + 50), 40, 52, 66)
+        /* pressed feedback in the icon set's own amber (#E8A33D) */
+        pFill.setColor(down ? Color.argb(Math.min(255, alpha + 50), 62, 48, 18)
                 : Color.argb(alpha * 2 / 3, 12, 16, 22));
         c.drawRoundRect(rf, rad, rad, pFill);
         pStroke.setStrokeWidth(Math.max(2f, u * 1.2f));
         pStroke.setColor(accent ? Color.argb(alpha, 79, 195, 247)
+                : down ? Color.argb(Math.min(255, alpha + 60), 232, 163, 61)
                 : Color.argb(alpha, 255, 255, 255));
         c.drawRoundRect(rf, rad, rad, pStroke);
         if (cfgLabels) {

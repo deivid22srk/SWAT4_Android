@@ -54,6 +54,20 @@
  * the block identity so the writer can be pinpointed from the log. */
 #define PAD_MIN 512u
 #define PAD_ALIGN 64u
+#define PAD_SLACK 48u
+/* shhxpott: the 19952-byte Havok parse buffers wrote ~90 bytes past their end
+ * - the 64-byte rounding left them as little as 8 bytes of slack when
+ * (HDR+n) was already 64-aligned - smashed the adjacent free block twice
+ * (once taking a live object with it) and the career load died on the
+ * wounded object's NULL vtable. Windows keeps the same guest code alive by
+ * rounding large HeapAlloc entries far looser, so big buffers get a
+ * GUARANTEED minimum slack (independent of the size's remainder): 192 bytes
+ * + the 16-byte tail for n >= 4096 (absorbs ~200 bytes, 2x the observed
+ * overrun), 48 + tail for the 512..4095 mid class. 512 MB of heap makes
+ * the few extra hundred bytes per block noise. */
+#define PAD_ALIGN_BIG 256u
+#define PAD_BIG_MIN 4096u
+#define PAD_SLACK_BIG 192u
 #define TAIL 16u
 #define TAIL_MAGIC 0xA5A5A5A5u
 #define TAIL_N(p) (M32((p) + 4))
@@ -260,7 +274,14 @@ static void set_block(uint32_t b, uint32_t size, int used) {
 uint32_t gmalloc(uint32_t n) {
     uint32_t need = (n + HDR + 15) & ~15u;
     if (need < MINBLK) need = MINBLK;
-    if (n >= PAD_MIN) need = ((need + PAD_ALIGN - 1) & ~(PAD_ALIGN - 1)) + TAIL;
+    if (n >= PAD_MIN) {
+        /* guaranteed minimum slack: round up, then ADD the slack and the
+         * tail OUTSIDE the rounding so the containment never collapses to
+         * zero when (HDR+n) is already aligned (the 19952 lesson) */
+        uint32_t pa = n >= PAD_BIG_MIN ? PAD_ALIGN_BIG : PAD_ALIGN;
+        uint32_t sl = n >= PAD_BIG_MIN ? PAD_SLACK_BIG : PAD_SLACK;
+        need = ((need + pa - 1) & ~(pa - 1)) + TAIL + sl;
+    }
     if (n > 0x7FFFFFFF) return 0;
     pthread_mutex_lock(&g_heap_lock);
     int rebuilt = 0;
