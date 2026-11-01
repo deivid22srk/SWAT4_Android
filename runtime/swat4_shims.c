@@ -352,8 +352,19 @@ SHIM(vsprintf) {
     size_t n = out ? guest_vformat(out, 4096, GSTR(ARG(1)), ARG(2)) : 0;
     RETC(n);
 }
+/* hhkport (2026-11-01): the Havok memory system (Engine.dll sub-allocator
+ * f_18143C0, its pool state at 0x42bda000, chunk requests via the function
+ * pointer at 0x19EABB4 = MSVCR71!_aligned_malloc) calls
+ * _aligned_malloc(0x2040, 0x40) — MSVC signature is (size, alignment). The
+ * shim read them SWAPPED, so a "0x2040-sized" request was serviced with
+ * alignment 0x2040: the returned q sat up to 0x2040-1 bytes past p+8 and the
+ * pool's usable window [q, q+0x2040) ran up to ~8 KB past the block end —
+ * streaming Havok data across neighbouring blocks (the njdjport 8328-byte
+ * overrun, the shhxpott 19952-byte overrun and the smashed free-list links),
+ * finally tripping the paranoid writer trap at top+0x306C. With the real
+ * order the same 0x2088-byte gmalloc window always contains [q, q+size). */
 SHIM(_aligned_malloc) {
-    uint32_t a = ARG(0), n = ARG(1);
+    uint32_t n = ARG(0), a = ARG(1); /* _aligned_malloc(size, alignment) */
     if (!a) a = 8;
     uint32_t p = gmalloc(n + a + 8);
     uint32_t q = (p + 8 + a - 1) & ~(a - 1);

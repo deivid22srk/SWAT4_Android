@@ -1708,3 +1708,50 @@ observado), 48+cauda para a classe 512..4095 (o bug da fórmula
 * `sh scripts/test_hud.sh`: rc=0 (vinput/dinput/hud intatos).
 * ecj 3.33 + android-all API 33 (Robolectric, java/javax removidos): árvore
   Java completa (io + org.libsdl) compila com 0 erros.
+
+## 2026-11-01 (2) — hhkport: a causa raiz da Carreira, agora com nome
+
+### Cadeia de evidência (log hhkport.zip do usuário)
+
+* O writer trap do commit anterior armou no 1º evento ("PARANOID MODE on:
+  quarantine and bump frontier [2137e598..40000000) are read-only") e a
+  escrita bogus seguinte morreu com o autor: SIGSEGV code 1 em guest
+  0x21381604 (top+0x306C), backtrace f_18143C0+0x4f4 ← f_1816380+0xdc ←
+  f_1750430+0x244 ← f_176EB70+0xd0 ← f_1747040+0x5c8 ← f_14046CE+0xfa0,
+  registrados eax=213805c0 esi=42bda000.
+* f_18143C0 (Engine.dll, engine_84.c liftado) é o sub-alocador do sistema
+  de memória do Havok: bins 0x40/0x200/0x2000, mágica 0x3425234 nos nós
+  livres, chunks via M32(0x19EABB4) — que o log revela ser
+  `MSVCR71!_aligned_malloc` (ret=0181444a/018145aa, args 0x2040/0x40).
+* Os 3 últimos eventos do heap runtime antes da corrupção são exatamente
+  os chunks do pool: alloc 20860ba0/20862d70/20864f40 size=8328
+  (0x2040+0x40+8).
+* Última linha do jogo antes da corrupção: "(Havok): Physical world for
+  ULevel being created." — o load do SP-FoodWall morre na criação do mundo
+  físico, os 3 logs seguidos (njdjport/shhxpott/hhkport) no mesmo ponto.
+
+### Causa raiz
+
+`shim__aligned_malloc` lia os args TROCADOS: `a=ARG(0), n=ARG(1)`. A
+assinatura MSVC é `_aligned_malloc(size, alignment)`; o Havok pede
+(0x2040, 0x40) e recebia alinhamento 0x2040 — `q` caía até 0x203F bytes
+depois de p+8 e a janela usável `[q, q+0x2040)` estourava o bloco em até
+~8 KB pastando nos vizinhos. Com blocos de 0x21D0 empacotados, ~metade dos
+chunks estoura — a "corrupção em streaming" de megabytes dos 3 logs.
+`scripts/test_aligned_malloc.c` prova: com os endereços reais do log, 8/16
+chunks estouram (piores 8184 B) no shim antigo, 0/16 no corrigido; o 2º
+chunk real (20862d70) estourava 8136 B direto sobre o 3º e mais 3 blocos.
+
+### Correção
+
+`runtime/swat4_shims.c`: `n=ARG(0), a=ARG(1)` — a mesma janela 0x2088 do
+gmalloc agora sempre contém `[q, q+size)` e o alinhamento 0x40 pedido pelo
+guest é honrado. Contenção (tail slack) e writer trap permanecem como
+defesa para qualquer outro escritor divergente.
+
+### Validação
+
+* `gcc -O1 scripts/test_aligned_malloc.c && a.out`: antigo 8/16 estourando,
+  corrigido 0/16, alinhamento ok (rc=0).
+* `gcc -fsyntax-only -Iruntime runtime/{swat4_shims,heap,kernel32,msvcrt,misc,shims,dispatch,modules}.c`: rc=0.
+* `sh tools/test_heap.sh`: ALL PASS; `sh scripts/test_hud.sh`: rc=0.
