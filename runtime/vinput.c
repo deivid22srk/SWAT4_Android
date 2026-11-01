@@ -28,10 +28,46 @@ static volatile uint32_t s_edges;         /* key transitions (diagnostics) */
 static int s_cur_x, s_cur_y = -1;   /* last cursor position (y=-1: unset) */
 static int s_cur_left;              /* synthesized left button state */
 
+/* Closed-loop cursor steering: the engine's GUI cursor ONLY moves through
+ * the DirectInput delta stream (windrv maps DIMOFS_X/Y -> IK_MouseX/Y;
+ * WM_MOUSEMOVE never reaches the input layer — field log shhxlog: 31
+ * WM_MOUSEMOVE + 31 WM clicks dispatched, menu cursor still frozen at
+ * 0,0). s_eng_mx/s_eng_my models where the steering deltas put the
+ * engine cursor. Premise: UE2's GUI cursor is moved only by the GUI
+ * while menus are displayed; mission look does not move it — the model
+ * therefore tracks steering only, and the first steer after a mission
+ * re-steers from the last menu position. The field one-shot + periodic
+ * cur/steers log (platform_present_hook) falsifies this if wrong.
+ * Guest client pixels; game-thread only (see vinput.h). */
+static int s_eng_mx, s_eng_my;      /* believed engine cursor position */
+static uint32_t s_steers;           /* steers that pushed non-zero deltas */
+static uint8_t s_steer_logged;      /* one-shot field diagnostic */
+
 static void cur_post(uint32_t msg, uint32_t wp) {
     user32_mouse_msg(msg, wp, ((uint32_t)s_cur_y << 16) | ((uint32_t)s_cur_x & 0xFFFF));
 }
 static void menu_click_edge(int down); /* shared left-button edge (below) */
+
+/* Push the engine cursor to (x,y) through the same DI delta stream the
+ * look path uses — the only channel that moves it while menus are up.
+ * Idempotent: the model lands exactly on (x,y), so repeated steers push
+ * zero. */
+static void menu_steer(int x, int y) {
+    int dx = x - s_eng_mx, dy = y - s_eng_my;
+    if (!dx && !dy) return;
+    if (!s_steer_logged) {
+        s_steer_logged = 1;
+        /* lets the field log check the init (engine cursor starts at 0,0)
+         * and gain (multiplier guarded to 1.0) assumptions */
+        LOG("menu steer: first delta dx=%d dy=%d -> cur %d,%d", dx, dy, x, y);
+    }
+    s_steers++;
+    vinput_mouse_delta(dx, dy);
+    /* model updated at steer time, not on take/delta: the engine cursor
+     * is believed parked at the last steered target across missions */
+    s_eng_mx = x;
+    s_eng_my = y;
+}
 
 void vinput_mouse_delta(int dx, int dy) {
     s_mx += dx;
@@ -78,6 +114,10 @@ void vinput_mouse_button(int btn0a2, int down) {
             menu_click_edge(down);
             return;
         }
+        /* Buttons 1/2 share the closed-loop cursor: steer to the (possibly
+         * center-fallback) cursor before the WM pair — button 0's edge
+         * steers inside menu_click_edge instead. Up edges push zero. */
+        if (s_cur_y >= 0) menu_steer(s_cur_x, s_cur_y);
         if (down) s_btn |= bit; else s_btn &= ~bit;
         cur_post(down ? down_msg[btn0a2] : up_msg[btn0a2], down ? mk_flag[btn0a2] : 0);
         return;
@@ -158,6 +198,10 @@ int vinput_active(void) {
 /* ---- menu mouse: see vinput.h ---- */
 
 void vinput_menu_move(int x, int y) {
+    /* Steer BEFORE the WM post: when the WM is deduped away the steer
+     * still runs (an unchanged spot pushes zero deltas, look drift does
+     * not). */
+    menu_steer(x, y);
     if (x == s_cur_x && y == s_cur_y) return; /* dedupe: fingers stream at ~120 Hz */
     s_cur_x = x;
     s_cur_y = y;
@@ -176,6 +220,11 @@ static void menu_click_edge(int down) {
     down = down ? 1 : 0;
     if (down == s_cur_left) return; /* WM expects real edges only */
     s_cur_left = down;
+    /* Down edges steer the engine cursor onto the click point first: the
+     * click must land where the finger is, not where the model drifted
+     * (video screen-20261101-062041: clicks fired where no control was).
+     * Up edges add nothing. */
+    if (down && s_cur_y >= 0) menu_steer(s_cur_x, s_cur_y);
     if (down) s_btn |= 1u; else s_btn &= ~1u; /* DI mirror */
     cur_post(down ? WM_LBUTTONDOWN : WM_LBUTTONUP, down ? MK_LBUTTON : 0);
 }
@@ -183,4 +232,10 @@ static void menu_click_edge(int down) {
 void vinput_cursor(int *x, int *y) {
     if (x) *x = s_cur_x;
     if (y) *y = s_cur_y < 0 ? 0 : s_cur_y;
+}
+
+void vinput_cursor_stats(int *ex, int *ey, uint32_t *steers) {
+    if (ex) *ex = s_eng_mx;
+    if (ey) *ey = s_eng_my;
+    if (steers) *steers = s_steers;
 }

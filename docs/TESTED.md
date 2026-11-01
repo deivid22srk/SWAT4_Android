@@ -1324,3 +1324,65 @@ suporte a xinput ou dinput, melhor mudar para virtual gamepad".
 * Os shims de janela/mouse (WM pair) continuam como estavam: um mouse real
   entrega WM **e** DI — o motor trata os dois (Press duplicado no mesmo
   tick é no-op no estado de input).
+
+## 2026-11-01 — Clique morto no menu, parte 2: o cursor da GUI nunca recebeu
+deltas — steering em malha fechada pelo stream DI (CRIADOR 2 rodadas + CRÍTICO 3 rodadas, 9.6/10)
+
+### O que o log shhxlog + vídeo screen-20261101-062041 provaram
+
+O build anterior já entregava o clique ao guest por DOIS canais — WM pair
+(31 WM_MOUSEMOVE + 31 WM clicks despachados) e evento DI bufferizado
+(`DI mouse buffered: first event ofs=12 data=0080` consumido pela engine) —
+e o menu continuou morto. Motivo, lido no windrv recompilado
+(`upload/gen/windrv_00.c`, f_21010E1): o cursor da GUI só se move pelos
+eixos IK_MouseX/IK_MouseY gerados dos deltas DIMOFS_X/Y (multiplicador
+guardado para 1.0 no próprio código do motor; Y negado; delta assinado
+int32). O canal WM é ignorado pela camada de input. Como o caminho de menu
+nunca gerou deltas (e `SDL_HINT_TOUCH_MOUSE_EVENTS=0` garante que o SDL
+também não), o cursor ficou congelado onde começou e todo clique caiu onde
+não há controle — teclado OK (ESC abriu "Quit to Windows?"), mouse morto.
+
+### Correção — steering em malha fechada (vinput.c)
+
+* Modelo do cursor do motor (`s_eng_mx/my`, init 0,0 — posição inicial
+  observada em campo) e `menu_steer(x,y)`: empurra `(alvo - modelo)` pelo
+  MESMO acumulador de deltas que o stream DI consome; modelo absoluto
+  atualizado no steer (idempotente: re-steer no mesmo alvo empurra zero).
+* Premissa documentada: o cursor da GUI só se move com menus ativos
+  (execMouseEmulation é nativo chamado por script da UGUIController; a
+  interação da GUI não roda em missão) — look de missão NÃO contamina o
+  modelo; o primeiro steer pós-missão re-anciona da última posição de menu.
+  Falsificadores em campo: one-shot `menu steer: first delta ...` e campo
+  `cur %d,%d steers %u` na linha periódica `hud:`.
+* Ordem no poll (BLOCKER pego pelo CRÍTICO): um toque posta MMOVE+MENUCLICK
+  no mesmo present hook e o poll do windrv roda no tick seguinte — deltas e
+  borda pendem juntos num GetDeviceData. `dev_GetDeviceData` agora emite
+  DELTAS ANTES das bordas de botão (ordem cronológica real: o dedo move
+  antes de apertar); sem isso o clique disparava no cursor velho dentro do
+  mesmo poll. Testes 7c/7e re-pinados em [delta..., borda] e 8d fixa a
+  forma exata do toque num poll: [X(l/2), Y(a/2), 12/0x80].
+* FIFO DI 32->64 entradas (mev_n uint16) + LOG one-shot se transbordar
+  (delta caído dessincroniza modelo vs motor); one-shot agora registra os
+  TRÊS primeiros eventos lidos (prova deltas-lideram em campo).
+* GetCursorPos/GetMessagePos/WM continuam como estavam (canais paralelos
+  que um mouse real também entrega).
+
+### Validação
+
+* `sh scripts/test_hud.sh` verde: selftests do anel e do scan + 17 blocos
+  comportamentais (steering idempotente, re-ancoragem pós-missão, fallback
+  do centro com steering, forma do toque num poll, PEEK, FIFO cap=1).
+* Cadeia de qualidade: CRIADOR (implementação) -> CRÍTICO r1 6.5 REJEITADO
+  (BLOCKER ordem no poll) -> CRIADOR r2 -> CRÍTICO r2 9.2 (premissa do
+  modelo em aberto) -> verificação nos fontes decompilados (f_21010E1:
+  multiplicador 1.0, delta assinado, Y negado; execMouseEmulation via
+  binding de script) -> CRÍTICO r3 **9.6 PASSOU**.
+
+### O que esperar no aparelho
+
+* Menu: tocar um item move o cursor da GUI até o dedo (stream DI) e o
+  clique cai no controle — itens do menu principal, Yes/No do "Quit to
+  Windows?", Settings etc.
+* Se após uma missão o menu clicar com desvio constante, o log mostrará
+  `steers` subindo com `cur` nos alvos — premissa falsada; a correção é
+  o modelo track-all + clamp (uma linha de inversão, já planejada).

@@ -27,15 +27,23 @@ typedef struct {
      * keeps events the guest has not read yet (it reads one per call). */
     uint8_t mbtn_prev[3];          /* last reported button state */
     int32_t pend_dx, pend_dy;      /* deltas not yet emitted */
-    uint8_t mev_ofs[32];           /* pending DIMOFS_* offsets */
-    uint32_t mev_data[32];         /* pending dwData values */
-    uint8_t mev_n;                 /* FIFO length */
-    uint8_t logged_first;          /* one-shot field diagnostic */
+    uint8_t mev_ofs[64];           /* pending DIMOFS_* offsets */
+    uint32_t mev_data[64];         /* pending dwData values */
+    uint16_t mev_n;                /* FIFO length */
 } DIDev;
 
 /* Append one buffered mouse event (DIDEVICEOBJECTDATA offset + data). */
 static void mouse_push(DIDev *d, uint32_t ofs, uint32_t data) {
-    if (d->mev_n >= sizeof d->mev_ofs) return; /* drop oldest would be worse */
+    if (d->mev_n >= (int)(sizeof d->mev_ofs / sizeof d->mev_ofs[0])) {
+        /* a dropped delta desyncs the steering model vs the engine — the
+         * field log must see it (one-shot) */
+        static int logged_full;
+        if (!logged_full) {
+            logged_full = 1;
+            LOG("DI mouse buffered: FIFO full, event dropped");
+        }
+        return; /* drop newest: dropping the oldest would corrupt order */
+    }
     d->mev_ofs[d->mev_n] = (uint8_t)ofs;
     d->mev_data[d->mev_n] = data;
     d->mev_n++;
@@ -179,13 +187,31 @@ SHIM(dev_GetDeviceData) {
          * (a real device records transitions as they happen — DIGDD_PEEK
          * must see them too); only the drain is skipped on PEEK. The
          * touch overlay's deltas and buttons arrive through vinput
-         * exactly like the SDL mouse. */
+         * exactly like the SDL mouse.
+         * Deltas are pushed BEFORE the button edges: a tap's steer
+         * deltas and press edge pend in the same poll (hud_drain at
+         * Present, windrv poll next frame tick) — deltas must lead or
+         * the click fires at the stale cursor (the finger moves before
+         * it presses; the true chronological order for taps). Known
+         * corner: a press whose first move lands in the SAME drain
+         * coalesces to [steer-to-a, down] where chronology would be
+         * [steer-to-a, down, steer-to-b] — inherent to poll-time
+         * coalescing, the WM pair still carries the exact point.
+         * Missions: look deltas now lead fire edges in a coalesced poll
+         * (real mice do the same) — a fire-while-turning sanity check
+         * goes on the first mission field run. */
         int dx, dy, vx, vy;
+        /* Desktop SDL mouse deltas bypass the steering model (they never
+         * pass through vinput) — touch builds set
+         * SDL_HINT_TOUCH_MOUSE_EVENTS=0 so this is desktop-testing-only;
+         * steering self-corrects on the next steer. */
         Uint32 b = SDL_GetRelativeMouseState(&dx, &dy);
         (void)b;
         vinput_mouse_take(&vx, &vy);
         d->pend_dx += dx + vx;
         d->pend_dy += dy + vy;
+        if (d->pend_dx) { mouse_push(d, 0, (uint32_t)d->pend_dx); d->pend_dx = 0; }
+        if (d->pend_dy) { mouse_push(d, 4, (uint32_t)d->pend_dy); d->pend_dy = 0; }
         uint32_t vb = vinput_mouse_buttons();
         for (int i = 0; i < 3; i++) {
             uint32_t cur = (vb >> i) & 1u;
@@ -194,12 +220,17 @@ SHIM(dev_GetDeviceData) {
                 d->mbtn_prev[i] = (uint8_t)cur;
             }
         }
-        if (d->pend_dx) { mouse_push(d, 0, (uint32_t)d->pend_dx); d->pend_dx = 0; }
-        if (d->pend_dy) { mouse_push(d, 4, (uint32_t)d->pend_dy); d->pend_dy = 0; }
     }
     if (d->kind == DEV_MOUSE && buf && sz >= 16) {
         /* PEEK serves each buffered event once per call (a real device
          * enumerates the buffer without draining it); non-peek drains. */
+        /* One-shot field diagnostic: the first three events the engine
+         * READS (windrv polls non-peek) prove the tap shape — after the
+         * deltas-first push a tap must read X/Y then the button edge,
+         * not edge-then-deltas. */
+        static uint8_t first_n;        /* of the first three, already read */
+        static uint8_t first_ofs[3];
+        static uint32_t first_data[3];
         uint32_t limit = (flags & 1) ? d->mev_n : cap;
         for (; d->mev_n && n < limit && n < cap; n++) {
             uint32_t e = buf + n * sz;
@@ -208,14 +239,18 @@ SHIM(dev_GetDeviceData) {
             M32(e + 4) = d->mev_data[0];
             M32(e + 8) = SDL_GetTicks();
             M32(e + 12) = ++d->seq;
-            if (!d->logged_first) {
-                d->logged_first = 1;
-                LOG("DI mouse buffered: first event ofs=%u data=%04x",
-                    d->mev_ofs[0], d->mev_data[0]);
+            if (!(flags & 1) && first_n < 3) {
+                first_ofs[first_n] = d->mev_ofs[0];
+                first_data[first_n] = d->mev_data[0];
+                first_n++;
+                if (first_n == 3)
+                    LOG("DI mouse buffered: first ofs/data triple: %u/%04x %u/%04x %u/%04x",
+                        first_ofs[0], first_data[0], first_ofs[1], first_data[1],
+                        first_ofs[2], first_data[2]);
             }
             if (!(flags & 1)) { /* DIGDD_PEEK reads without draining */
                 d->mev_n--;
-                for (int i = 0; i < d->mev_n; i++) { /* pop front (32 entries max) */
+                for (int i = 0; i < d->mev_n; i++) { /* pop front (64 entries max) */
                     d->mev_ofs[i] = d->mev_ofs[i + 1];
                     d->mev_data[i] = d->mev_data[i + 1];
                 }

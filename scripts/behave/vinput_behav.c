@@ -8,6 +8,14 @@
  *     - a tap BEFORE the first menu-finger move lands at the guest screen
  *       center instead of being dropped (field video 205831: first taps
  *       disappeared);
+ *     - menu moves/clicks steer the engine cursor through the DI delta
+ *       stream — the ONLY channel that moves it (field log shhxlog: 31
+ *       WM_MOUSEMOVE + 31 WM clicks dispatched, cursor still frozen at
+ *       0,0): closed-loop against a model of where the steering deltas
+ *       put the engine cursor, so repeated steers push zero; the model
+ *       tracks steering only (mission look does not move the GUI cursor
+ *       — the GUI interaction only runs while menus are displayed), so
+ *       a post-mission steer re-anchors from the last menu position;
  *     - mission-context taps stay DI-only (no WM double-fire);
  *     - key taps set the DIK state and post WM through the queue — or
  *       straight into the WndProc while a Bink movie is open (that loop
@@ -102,10 +110,21 @@ static void reset_all(void) {
     memset(s_keys, 0, sizeof s_keys);
     s_edges = 0;
     s_cur_x = 0; s_cur_y = -1; s_cur_left = 0;
+    s_eng_mx = 0; s_eng_my = 0; s_steers = 0; s_steer_logged = 0;
     n_key = n_keydir = n_mouse = 0;
     stub_ctx = 1;
     stub_movie = 0;
     stub_w = 1600; stub_h = 720;
+}
+
+/* Park the menu cursor at the guest screen center and drain the steering
+ * deltas (models the windrv poll between frames — in the field the engine
+ * consumes them long before the next tap): the DI stream below then holds
+ * only what each subtest feeds. */
+static void park_cursor_center(void) {
+    vinput_menu_move(stub_w / 2, stub_h / 2);
+    int dx, dy;
+    vinput_mouse_take(&dx, &dy);
 }
 
 /* Run one shim call with args placed in guest memory (ARG(n) reads them
@@ -211,6 +230,7 @@ int main(void) {
     reset_all();
     uint32_t dev = mouse_device();
     CHECK(dev != 0);
+    park_cursor_center(); /* clicks must not inject steering deltas here */
 
     /* 7a. one click = two edges (down 0x80, up 0x00), one per call */
     vinput_mouse_button(0, 1);
@@ -248,18 +268,24 @@ int main(void) {
     CHECK(M32(pn) == 0);
     printf("behav: DI buffered coalesced deltas (0/4): ok\n");
 
-    /* 7c. FIFO order survives cap=1 (how the windrv poll loop reads) */
+    /* 7c. FIFO order survives cap=1 (how the windrv poll loop reads),
+     * and deltas LEAD the button edge inside one poll: a tap's steer
+     * deltas and press edge pend in the same poll (hud_drain at Present,
+     * windrv poll next frame tick) — deltas must lead or the click fires
+     * at the stale cursor. The model ignores raw look deltas, so the
+     * click here adds no steering of its own. */
     reset_all();
     dev = mouse_device();
+    park_cursor_center();
     vinput_mouse_delta(2, 0);
     vinput_mouse_button(0, 1);
     a5[0] = dev;
     M32(pn) = 1;
     run_shim(shim_dev_GetDeviceData, 5, a5);
-    CHECK(M32(pn) == 1 && M32(buf) == 12 && M32(buf + 4) == 0x80); /* edge first */
+    CHECK(M32(pn) == 1 && M32(buf) == 0 && M32(buf + 4) == 2u);    /* X first */
     M32(pn) = 1;
     run_shim(shim_dev_GetDeviceData, 5, a5);
-    CHECK(M32(pn) == 1 && M32(buf) == 0 && M32(buf + 4) == 2u);    /* then X */
+    CHECK(M32(pn) == 1 && M32(buf) == 12 && M32(buf + 4) == 0x80); /* then edge */
     M32(pn) = 1;
     run_shim(shim_dev_GetDeviceData, 5, a5);
     CHECK(M32(pn) == 0);
@@ -268,6 +294,7 @@ int main(void) {
     /* 7d. DIGDD_PEEK reads without draining */
     reset_all();
     dev = mouse_device();
+    park_cursor_center();
     vinput_mouse_button(1, 1);                    /* right button */
     a5[0] = dev; a5[1] = 20; a5[2] = buf; a5[3] = pn;
     M32(pn) = 4;
@@ -286,26 +313,139 @@ int main(void) {
     CHECK(M32(pn) == 0);
     printf("behav: DI DIGDD_PEEK sees but leaves the buffer: ok\n");
 
-    /* 7e. GetDeviceState no longer consumes deltas (buttons only) */
+    /* 7e. GetDeviceState no longer consumes deltas (buttons only), and
+     * the buffered stream one poll reads is [X, Y, edge] — deltas lead
+     * the press edge in the same call (the model ignores look deltas, so
+     * the click adds no steering here). */
     reset_all();
     dev = mouse_device();
-    vinput_mouse_delta(9, -9);
+    park_cursor_center();
     uint32_t st = gmalloc(32);
     a3[0] = dev; a3[1] = 16; a3[2] = st;
     run_shim(shim_dev_GetDeviceState, 3, a3);
     CHECK(M32(st) == 0 && M32(st + 4) == 0);      /* no delta theft */
     CHECK(M8(st + 12) == 0);                      /* button up */
+    vinput_mouse_delta(9, -9);
     vinput_mouse_button(0, 1);
     run_shim(shim_dev_GetDeviceState, 3, a3);
     CHECK(M8(st + 12) == 0x80);                   /* button mirrors */
     a5[0] = dev; a5[1] = 20; a5[2] = buf; a5[3] = pn; a5[4] = 0;
     M32(pn) = 4;
     run_shim(shim_dev_GetDeviceData, 5, a5);
-    CHECK(M32(pn) == 3);                          /* edge + X + Y, in order */
-    CHECK(M32(buf) == 12 && M32(buf + 4) == 0x80);
-    CHECK(M32(buf + 20) == 0 && M32(buf + 24) == 9u);
-    CHECK(M32(buf + 40) == 4 && M32(buf + 44) == (uint32_t)-9);
+    CHECK(M32(pn) == 3);                          /* X + Y + edge, in order */
+    CHECK(M32(buf) == 0 && M32(buf + 4) == 9u);   /* DIMOFS_X */
+    CHECK(M32(buf + 20) == 4 && M32(buf + 24) == (uint32_t)-9); /* DIMOFS_Y */
+    CHECK(M32(buf + 40) == 12 && M32(buf + 44) == 0x80);        /* then BUTTON0 */
     printf("behav: GetDeviceState buttons-only, deltas reach GetDeviceData: ok\n");
+
+    /* ---- 8. closed-loop cursor steering: the GUI cursor only moves via
+     * the DI delta stream (field log shhxlog: WM_MOUSEMOVE alone left it
+     * frozen at 0,0), so the menu path must steer it to the touch point */
+
+    /* 8a. menu move steers exactly once and posts the WM */
+    reset_all();
+    g_log_level = 1; /* show the one-shot first-steer LOG line once */
+    vinput_menu_move(100, 50);
+    g_log_level = 0;
+    int tdx, tdy;
+    vinput_mouse_take(&tdx, &tdy);
+    CHECK(tdx == 100 && tdy == 50);
+    vinput_mouse_take(&tdx, &tdy);
+    CHECK(tdx == 0 && tdy == 0);                 /* exactly once */
+    CHECK(n_mouse == 1);
+    CHECK(rec_mouse[0][0] == 0x200);             /* WM_MOUSEMOVE */
+    CHECK((rec_mouse[0][2] & 0xFFFF) == 100);
+    CHECK((rec_mouse[0][2] >> 16) == 50);
+    int ex, ey; uint32_t steers;
+    vinput_cursor_stats(&ex, &ey, &steers);
+    CHECK(ex == 100 && ey == 50 && steers == 1); /* model landed on target */
+    vinput_cursor_stats(NULL, NULL, NULL);       /* NULLs tolerated */
+    printf("behav: menu move steers the engine cursor once: ok\n");
+
+    /* 8b. repeated move to the SAME spot: no double steering */
+    vinput_menu_move(100, 50);
+    vinput_mouse_take(&tdx, &tdy);
+    CHECK(tdx == 0 && tdy == 0);
+    CHECK(n_mouse == 1);                         /* WM still deduped */
+    vinput_cursor_stats(NULL, NULL, &steers);
+    CHECK(steers == 1);                          /* zero-delta steers don't count */
+    printf("behav: repeated menu move does not re-steer: ok\n");
+
+    /* 8c. mission-look resync: the model IGNORES look deltas (UE2's GUI
+     * cursor is moved only by the GUI while menus are displayed) — after
+     * a mission the first menu move re-steers from the LAST MENU
+     * POSITION, not from wherever looking drifted to */
+    reset_all();
+    vinput_menu_move(400, 300);                  /* last menu position (a,b) */
+    vinput_mouse_take(&tdx, &tdy);
+    CHECK(tdx == 400 && tdy == 300);             /* its steer, polled */
+    vinput_mouse_delta(500, 400);                /* mission look */
+    vinput_mouse_take(&tdx, &tdy);
+    CHECK(tdx == 500 && tdy == 400);             /* the engine polls it every frame */
+    vinput_menu_move(100, 50);
+    vinput_mouse_take(&tdx, &tdy);
+    CHECK(tdx == 100 - 400 && tdy == 50 - 300);  /* (100-a, 50-b): look ignored */
+    vinput_cursor_stats(&ex, &ey, NULL);
+    CHECK(ex == 100 && ey == 50);                /* model at the new target */
+    printf("behav: menu move re-steers after mission look from the last menu position: ok\n");
+
+    /* 8d. click with the cursor unset: the center fallback steers too,
+     * and the tap's stream shape in ONE poll is deltas-then-edge (the F1
+     * fix: hud_drain applies the steer + press together at Present, the
+     * windrv poll reads both in one GetDeviceData call) */
+    reset_all();
+    dev = mouse_device();
+    vinput_mouse_button(0, 1);
+    CHECK(n_mouse == 1 && rec_mouse[0][0] == 0x201); /* WM pair unchanged */
+    a5[0] = dev; a5[1] = 20; a5[2] = buf; a5[3] = pn; a5[4] = 0;
+    M32(pn) = 4;
+    run_shim(shim_dev_GetDeviceData, 5, a5);
+    CHECK(M32(pn) == 3);                         /* X, Y, edge — deltas lead */
+    CHECK(M32(buf) == 0 && M32(buf + 4) == (uint32_t)(stub_w / 2));
+    CHECK(M32(buf + 20) == 4 && M32(buf + 24) == (uint32_t)(stub_h / 2));
+    CHECK(M32(buf + 40) == 12 && M32(buf + 44) == 0x80);
+    vinput_mouse_take(&tdx, &tdy);
+    CHECK(tdx == 0 && tdy == 0);                 /* the poll drained the steer */
+    vinput_mouse_button(0, 0);
+    vinput_mouse_take(&tdx, &tdy);
+    CHECK(tdx == 0 && tdy == 0);                 /* up edge adds no deltas */
+    printf("behav: first click steers the center fallback: ok\n");
+
+    /* 8e. click at the current cursor after a move: no extra deltas, the
+     * DI button edge still mirrors */
+    reset_all();
+    vinput_menu_move(100, 50);
+    vinput_mouse_take(&tdx, &tdy);               /* the move's steer, polled */
+    CHECK(tdx == 100 && tdy == 50);
+    vinput_mouse_button(0, 1);
+    vinput_mouse_take(&tdx, &tdy);
+    CHECK(tdx == 0 && tdy == 0);                 /* already there */
+    CHECK((vinput_mouse_buttons() & 1u) == 1u);  /* DI bit mirrors */
+    vinput_mouse_button(0, 0);
+    CHECK((vinput_mouse_buttons() & 1u) == 0u);
+    vinput_mouse_take(&tdx, &tdy);
+    CHECK(tdx == 0 && tdy == 0);
+    printf("behav: click at the cursor adds no deltas, DI mirror intact: ok\n");
+
+    /* 8f. buttons 1/2 share the closed-loop cursor */
+    reset_all();
+    vinput_mouse_button(1, 1);                   /* right, cursor unset */
+    vinput_mouse_take(&tdx, &tdy);
+    CHECK(tdx == stub_w / 2 && tdy == stub_h / 2);
+    vinput_mouse_button(1, 0);
+    vinput_mouse_take(&tdx, &tdy);
+    CHECK(tdx == 0 && tdy == 0);
+    vinput_menu_move(100, 50);
+    vinput_mouse_take(&tdx, &tdy);
+    /* the fallback click left the model at the center: the move steers
+     * from there, not from 0,0 (closed-loop, not absolute) */
+    CHECK(tdx == 100 - stub_w / 2 && tdy == 50 - stub_h / 2);
+    vinput_mouse_button(2, 1);                   /* middle at the cursor */
+    vinput_mouse_take(&tdx, &tdy);
+    CHECK(tdx == 0 && tdy == 0);
+    CHECK((vinput_mouse_buttons() & 4u) == 4u);
+    vinput_mouse_button(2, 0);
+    printf("behav: right/middle buttons steer like the left: ok\n");
 
     printf(failures ? "vinput/dinput behav: %d FAILURES\n" : "vinput/dinput behav: all ok\n",
            failures);

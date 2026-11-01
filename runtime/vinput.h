@@ -26,6 +26,13 @@ extern "C" {
 void vinput_mouse_delta(int dx, int dy);
 /* Hands over (and zeroes) the accumulated mouse deltas. */
 void vinput_mouse_take(int *dx, int *dy);
+/* Diagnostics: believed engine cursor position (guest client pixels —
+ * where the menu steering deltas have carried it, on the premise that
+ * mission look does not move the GUI cursor) and the count of menu steers
+ * that pushed non-zero deltas. The periodic platform log prints both so
+ * the field log can answer whether the init (engine cursor at 0,0) and
+ * gain (multiplier 1.0) assumptions hold. Any pointer may be NULL. */
+void vinput_cursor_stats(int *ex, int *ey, uint32_t *steers);
 
 /* Mouse button 0/1/2 (left/right/middle) state. */
 void vinput_mouse_button(int btn0a2, int down);
@@ -67,10 +74,21 @@ int vinput_active(void);
  * WM_LBUTTONDOWN/WM_LBUTTONUP through user32_mouse_msg, and GetCursorPos
  * reports the same cursor. Coordinates are window client pixels. */
 /* Cursor moved to (x,y): posts WM_MOUSEMOVE only when the integer position
- * changed (finger events stream far faster than the game consumes). */
+ * changed (finger events stream far faster than the game consumes), and
+ * steers the engine cursor there through the DI delta stream first — the
+ * GUI cursor ONLY moves on IK_MouseX/Y axis deltas (WM_MOUSEMOVE is
+ * ignored by the engine input layer), so the WM alone left it frozen at
+ * 0,0 (field log shhxlog: 31 WM_MOUSEMOVE + 31 WM clicks, menu dead).
+ * Steering is closed-loop: vinput models the engine cursor from steering
+ * alone, on the premise that UE2's GUI cursor is moved only by the GUI
+ * while menus are displayed (execMouseEmulation is script-driven and the
+ * GUI interaction only runs there) — mission look does not move it, so
+ * the first steer after a mission re-steers from the last menu position.
+ * The field one-shot + periodic cur/steers log falsifies this if wrong. */
 void vinput_menu_move(int x, int y);
 /* Left-button edge: 1 = press (WM_LBUTTONDOWN), 0 = release (WM_LBUTTONUP).
- * Duplicate edges are ignored, so several fingers can share the state. */
+ * Duplicate edges are ignored, so several fingers can share the state.
+ * Down edges steer the engine cursor onto the click point first. */
 void vinput_menu_button(int down);
 /* Current virtual cursor for the GetCursorPos shim; 0,0 before first use. */
 void vinput_cursor(int *x, int *y);

@@ -381,11 +381,18 @@ void platform_present_hook(void) {
         uint32_t a = hud_applied_events(), d = hud_dropped_events();
         uint32_t mm, cl, ky;
         user32_wm_stats(&mm, &cl, &ky);
-        static uint32_t lmm, lcl, lky;
-        if (a != la || d != ld || mm != lmm || cl != lcl || ky != lky) {
-            LOG("hud: %u applied, %u dropped, ctx %d, wm %u mm/%u click/%u key dispatched",
-                a, d, hud_game_ctx(), mm, cl, ky);
-            la = a; ld = d; lmm = mm; lcl = cl; lky = ky;
+        /* closed-loop menu cursor steering: where the steering deltas
+         * have carried the engine cursor and how often it had to be
+         * pushed — answers in the field log whether the init/gain
+         * assumptions hold */
+        int eng_mx, eng_my;
+        uint32_t steers;
+        vinput_cursor_stats(&eng_mx, &eng_my, &steers);
+        static uint32_t lmm, lcl, lky, lst;
+        if (a != la || d != ld || mm != lmm || cl != lcl || ky != lky || steers != lst) {
+            LOG("hud: %u applied, %u dropped, ctx %d, wm %u mm/%u click/%u key dispatched, cur %d,%d steers %u",
+                a, d, hud_game_ctx(), mm, cl, ky, eng_mx, eng_my, steers);
+            la = a; ld = d; lmm = mm; lcl = cl; lky = ky; lst = steers;
         }
         if (hud_game_ctx() != lctx) {
             extern uint32_t hud_scan_gen(void);
