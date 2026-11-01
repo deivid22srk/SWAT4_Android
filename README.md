@@ -196,7 +196,9 @@ suportados via SDL2.
 Criado com os defaults na primeira execução; edite e reinicie o jogo.
 `scale` (0.5–2.0) tamanho dos botões; `opacity` (0.15–1.0); `look_sens`
 (0.2–3.0) sensibilidade do olhar; `look_invert_y`; `handed` (1 = canhoto);
-`labels` (0/1 textos nos botões); `stick_radius` (0.7–1.6); `hold_crouch` e
+`labels` (0/1: 1 mostra os ícones dos botões, caindo para o rótulo em
+texto quando um PNG não existir; 0 desenha as caixas vazias);
+`stick_radius` (0.7–1.6); `hold_crouch` e
 `hold_zoom` (AGACH/ZOOM enviam toque de 120 ms por padrão, o modo toggle do
 jogo; mude para 1 se o seu User.ini usar agachar/zoom por pressionar).
 

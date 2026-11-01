@@ -1,6 +1,8 @@
 package io.github.deivid22srk.swat4;
 
 import android.content.Context;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
 import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Paint;
@@ -18,6 +20,7 @@ import java.io.File;
 import java.io.FileReader;
 import java.io.FileWriter;
 import java.io.IOException;
+import java.io.InputStream;
 
 /**
  * The SWAT 4 touch HUD, as a real Android View.
@@ -49,14 +52,24 @@ import java.io.IOException;
  * hides and its F always fires.
  *
  * The D-pad above the stick is the keyboard's arrow keys as four
- * always-on buttons (chevron glyphs, WM key downs, auto-repeat while
- * held), so menus navigate without the stick.
+ * always-on buttons (dpad_*.png icons, or chevron glyphs as fallback,
+ * WM key downs, auto-repeat while held), so menus navigate without the
+ * stick.
  *
  * Every control sends the game's own input through HudBridge.post (a
  * lock-free SPSC ring drained by the game thread): mouse buttons, DIK key
  * state/taps, WM menu mouse. Nothing is simulated outside the game's real
  * input paths. Zero per-frame allocation; the view only invalidates when
  * something actually changes (touch, context flip, door proximity).
+ *
+ * Buttons show tactical line icons instead of the text labels when the
+ * icon set is available: decoded ONCE at construction, first from
+ * <game>/hudicons/*.png (user-swappable on device, no rebuild) and then
+ * from the APK's packaged assets/hudicons/ (docs/MANIFEST_ICONES_HUD.md
+ * documents every file -> button). A missing or broken PNG keeps that
+ * button's old text label, so the HUD degrades per button, never as a
+ * whole. The grid loads its two pages (slot_1..slot_0 and fx_1..fx_10)
+ * plus the two page chips the same way.
  *
  * Tuning stays in <game>/port/hud.ini — same keys and defaults the
  * runtime's previous overlay documented (version=2).
@@ -175,13 +188,30 @@ public class HudOverlay extends View {
     private final long[] pendDue = new long[16];
     private int nPend;
 
+    /* ---------------- icons (decoded once at construction) ------------ */
+    /** Icon file per BASE entry, index-aligned with BASE (B_FOGO..B_RIGHT). */
+    private static final String[] BASE_ICON = {
+            "fogo", "cmd", "slots", "usar", "porta",
+            "rec", "zoom", "modo", "agach", "correr",
+            "incl", "incr", "tab", "esp", "esc", "troca",
+            "dpad_up", "dpad_down", "dpad_left", "dpad_right",
+    };
+    private final Bitmap[] baseIcon = new Bitmap[B_NBASE];
+    private final Bitmap[] slotIcon = new Bitmap[10];   /* grid page 0: 1..9,0 */
+    private final Bitmap[] fxIcon = new Bitmap[10];     /* grid page 1: F1..F10 */
+    private Bitmap icToggleNum, icToggleFx;             /* grid page chips */
+
     /* ---------------- drawing (all preallocated) ---------------- */
     private final Paint pFill = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint pStroke = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint pText = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint pCircle = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint pIcon = new Paint(Paint.ANTI_ALIAS_FLAG
+            | Paint.FILTER_BITMAP_FLAG | Paint.DITHER_FLAG);
     private final RectF rf = new RectF();
-    /* D-pad chevron glyphs: built once per relayout, only stroked onDraw */
+    private final RectF ri = new RectF();   /* icon dst inside a button */
+    /* D-pad chevron glyphs: built once per relayout, only stroked onDraw
+     * (fallback for when the dpad_*.png icons are absent) */
     private final Path[] chev = new Path[4];
 
     private final Handler handler = new Handler(Looper.getMainLooper());
@@ -194,6 +224,7 @@ public class HudOverlay extends View {
         for (int i = 0; i < chev.length; i++) chev[i] = new Path();
         iniPath = gameDir == null ? null : new File(gameDir, "port/hud.ini").getAbsolutePath();
         loadCfg();
+        loadIcons(c, gameDir);
         setFocusable(false);
         setFocusableInTouchMode(false);
         setClickable(true);
@@ -291,6 +322,45 @@ public class HudOverlay extends View {
         cfgOpacity = clamp(cfgOpacity, 0.15f, 1.0f);
         cfgSens = clamp(cfgSens, 0.2f, 3.0f);
         cfgStick = clamp(cfgStick, 0.7f, 1.6f);
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* Icon set: <game>/hudicons/ wins (swappable on device), then the     */
+    /* APK assets; a missing PNG keeps that button's text label            */
+    /* ------------------------------------------------------------------ */
+    private void loadIcons(Context c, String gameDir) {
+        File dir = gameDir == null ? null : new File(gameDir, "hudicons");
+        for (int i = 0; i < B_NBASE && i < BASE_ICON.length; i++)
+            baseIcon[i] = decodeOne(dir, BASE_ICON[i], c);
+        for (int i = 0; i < 10; i++) {
+            slotIcon[i] = decodeOne(dir, "slot_" + ((i + 1) % 10), c);
+            fxIcon[i] = decodeOne(dir, "fx_" + (i + 1), c);
+        }
+        icToggleNum = decodeOne(dir, "toggle_num", c);
+        icToggleFx = decodeOne(dir, "toggle_fx", c);
+    }
+
+    /** name.png from dir, else from assets hudicons/, else null. Never
+     * throws: a broken set must never take the HUD down. */
+    private static Bitmap decodeOne(File dir, String name, Context c) {
+        try {
+            if (dir != null) {
+                File f = new File(dir, name + ".png");
+                if (f.isFile()) {
+                    Bitmap b = BitmapFactory.decodeFile(f.getAbsolutePath());
+                    if (b != null) return b;
+                }
+            }
+            InputStream in = c.getAssets().open("hudicons/" + name + ".png");
+            try {
+                return BitmapFactory.decodeStream(in);
+            } finally {
+                try { in.close(); } catch (IOException ignored) {
+                }
+            }
+        } catch (IOException | RuntimeException e) {
+            return null;
+        }
     }
 
     private static float clamp(float v, float lo, float hi) {
@@ -967,13 +1037,14 @@ public class HudOverlay extends View {
 
         /* every button, in EVERY context (PORTA brightens near a door) */
         for (int i = 0; i < B_NBASE; i++) {
-            drawBtn(canvas, BASE[i].label, bx[i], by[i], bsz[i], pressed[i],
-                    i == B_PORTA && doorNear, alpha);
+            drawBtn(canvas, baseIcon[i], BASE[i].label, bx[i], by[i], bsz[i],
+                    pressed[i], i == B_PORTA && doorNear, alpha);
         }
-        /* D-pad chevrons: the arrow buttons carry no text glyph (font
-         * coverage for such symbols varies across devices) — the prebuilt
-         * paths are only stroked here, never rebuilt per frame */
+        /* D-pad chevrons: fallback glyph only when the dpad_*.png icon is
+         * absent (the icon is drawn by the button loop above); the paths
+         * are only stroked here, never rebuilt per frame */
         for (int i = B_UP; i <= B_RIGHT; i++) {
+            if (baseIcon[i] != null) continue;
             pStroke.setStrokeWidth(Math.max(2f, bsz[i] * 0.1f));
             pStroke.setColor(pressed[i]
                     ? Color.argb(Math.min(255, alpha + 70), 255, 255, 255)
@@ -983,8 +1054,8 @@ public class HudOverlay extends View {
         if (gridOpen) drawGrid(canvas, alpha);
     }
 
-    private void drawBtn(Canvas c, String label, float x, float y, float sz, boolean down,
-                         boolean accent, int alpha) {
+    private void drawBtn(Canvas c, Bitmap icon, String label, float x, float y,
+                         float sz, boolean down, boolean accent, int alpha) {
         rf.set(x, y, x + sz, y + sz);
         float rad = sz * 0.24f;
         pFill.setColor(down ? Color.argb(Math.min(255, alpha + 50), 40, 52, 66)
@@ -994,11 +1065,21 @@ public class HudOverlay extends View {
         pStroke.setColor(accent ? Color.argb(alpha, 79, 195, 247)
                 : Color.argb(alpha, 255, 255, 255));
         c.drawRoundRect(rf, rad, rad, pStroke);
-        if (cfgLabels && label != null) {
-            pText.setTextSize(Math.max(9f, sz * 0.22f));
-            pText.setColor(Color.argb(Math.min(255, alpha + 70), 255, 255, 255));
-            float ty = y + sz * 0.5f - (pText.ascent() + pText.descent()) * 0.5f;
-            c.drawText(label, x + sz * 0.5f, ty, pText);
+        if (cfgLabels) {
+            if (icon != null) {
+                /* the icon replaces the text label; the bitmaps carry their
+                 * own 96/128 safe area, so they are inset from the shell */
+                float isz = sz * 0.82f;
+                float ins = (sz - isz) * 0.5f;
+                ri.set(x + ins, y + ins, x + ins + isz, y + ins + isz);
+                pIcon.setAlpha(Math.min(255, alpha + 70));
+                c.drawBitmap(icon, null, ri, pIcon);
+            } else if (label != null) {
+                pText.setTextSize(Math.max(9f, sz * 0.22f));
+                pText.setColor(Color.argb(Math.min(255, alpha + 70), 255, 255, 255));
+                float ty = y + sz * 0.5f - (pText.ascent() + pText.descent()) * 0.5f;
+                c.drawText(label, x + sz * 0.5f, ty, pText);
+            }
         }
     }
 
@@ -1012,7 +1093,10 @@ public class HudOverlay extends View {
         for (int i = 0; i < GRID_N; i++) {
             Btn b = grid[i];
             if (b == null) continue;
-            drawBtn(c, b.label, gx[i], gy[i], gsz[i], false, i == 10, alpha);
+            Bitmap ic;
+            if (i == 10) ic = gridPage != 0 ? icToggleNum : icToggleFx;
+            else ic = gridPage != 0 ? fxIcon[i] : slotIcon[i];
+            drawBtn(c, ic, b.label, gx[i], gy[i], gsz[i], false, i == 10, alpha);
         }
     }
 }

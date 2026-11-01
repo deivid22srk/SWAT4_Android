@@ -1525,3 +1525,58 @@ em um Pc" + "sinto falta daqueles botões cima baixo esquerda e direita no hud".
 * No log: `heap: OVERRUN ...` identifica o estourador pela combinação
   endereço+tamanho (o ring mostra a vizinhança); `fopen/fread` mostram os
   .hke lidos; `d3d9: CreateTexture/lock` mostram as páginas de fonte.
+
+## 2026-11-01 — Ícones do HUD (swat4-hud-icons.zip do usuário): 42 PNGs no lugar dos rótulos
+
+### O que chegou
+
+* O usuário gerou o pacote com `docs/PROMPT_ICONES_HUD.md` e enviou
+  `swat4-hud-icons.zip` (42 PNGs + `manifest.md`; a tabela do prompt especifica
+  42 arquivos, não 36 — o manifesto registra a diferença).
+* Todos os 42 foram validados por script local (`scripts/check_icons.py`,
+  decodificador PNG próprio): dimensão certa (`fogo.png` 192×192, resto
+  128×128), RGBA 8-bit, bordas 100% transparentes, conteúdo não vazio e
+  **só as duas cores do estilo** (`#F2F4F6` traço / `#E8A33D` acento,
+  tolerância de anti-aliasing ≤1%). `42 ok, 0 fail`. Conferência visual em
+  folha de contato sobre fundo escuro: pares `incl`/`incr` espelhados de
+  verdade, `zoom` ≠ `fogo`, numerais dos `slot_*` e `fx_*` legíveis.
+
+### Integração (android/app/src/main/java/.../HudOverlay.java)
+
+* PNGs empacotados no APK em `assets/hudicons/` (212 KB, sem subpastas) e
+  `manifest.md` virou `docs/MANIFEST_ICONES_HUD.md`.
+* Os bitmaps são decodificados **uma única vez no construtor** da View:
+  primeiro `<pasta do jogo>/hudicons/*.png` (o usuário troca o set no
+  aparelho sem recompilar), depois os assets do APK; PNG ausente/corrompido
+  mantém o rótulo de texto daquele botão — degradação por botão, nunca total.
+  `decodeOne()` nunca lança (IOException/RuntimeException → null).
+* Desenho: `drawBtn()` recebe o bitmap e o desenha com `drawBitmap(null-src,
+  dst pré-alocado, Paint FILTER_BITMAP_FLAG)` a 82% do botão (os PNGs já
+  carregam a área segura de 96/128 do estilo); alpha acompanha a opacidade do
+  HUD. Os quatro `dpad_*.png` substituem os chevrons desenhados (que continuam
+  como fallback se o PNG faltar). A grade usa `slot_1..slot_0` na página
+  numérica, `fx_1..fx_10` na página F e `toggle_fx`/`toggle_num` como chips de
+  página. Zero alocação por frame preservado (só `setAlpha` + dst reutilizado).
+* `labels=0` continua desenhando as caixas vazias (comportamento anterior
+  mantido); `labels=1` agora mostra ícone, caindo para texto quando o PNG
+  não existe. README.md atualizado.
+
+### Validação
+
+* `ecj` 3.36.0 `-source 17` + stubs Android (`scripts/stubs/`, recriados):
+  `HudOverlay.java` + `HudBridge.java` compilam com **0 erros** (2 warnings
+  pré-existentes: `DIK_0` e `Btn.id` não usados — documentação de tabela).
+* `bash scripts/test_hud.sh`: hud_jni ok, hud_state ok, 17 blocos behav ok
+  (rc=0).
+* Sem aparelho Android: o desenho real dos bitmaps no Canvas só é exercitado
+  no CI/aparelho.
+
+### O que esperar no aparelho
+
+* Todos os botões (e a grade aberta) mostram os ícones táticos; ESC/TROCA no
+  topo, FOGO maior no canto, PORTA com acento azul perto de porta (o acento é
+  no contorno, não no PNG), D-pad com chevrons duplos âmbar.
+* Para trocar um ícone sem recompilar: coloque o PNG em
+  `<pasta do jogo>/hudicons/<nome>.png` (nomes em `docs/MANIFEST_ICONES_HUD.md`).
+* Esta build também carrega a correção da Carreira (heap com folga de cauda)
+  e os diagnósticos do "meio branco" — o próximo log fecha essa causa.
