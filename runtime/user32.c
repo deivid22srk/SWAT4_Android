@@ -24,6 +24,22 @@ void user32_get_screen(int *w, int *h) {
     if (h) *h = g_screen_h;
 }
 
+/* Latched on the FIRST PeekMessage the guest's main loop issues: menus and
+ * missions pump every frame, the Bink intro loop never does (field bnlog
+ * iutlog: queued keys/clicks sat undrained through all three startup
+ * videos). This is engine BEHAVIOUR, not a memory read, so it stays
+ * reliable even where the object scan cannot run (field shhxlog: the scan
+ * stayed ctx UNKNOWN through the whole session — module bases and heap
+ * bands all verified correct in that log, the bail reason still unknown).
+ * The Java overlay latches its "menu seen" state on this (combined with a
+ * movie being open = the main menu running behind its background video)
+ * and stops routing free-finger touches to the movie-skip ESC — which is
+ * how "every tap acts as Esc" swallowed the whole menu (user report,
+ * 2026-11-01). Game-thread writer, UI-thread reader: an int store, read
+ * advisory. */
+static volatile int g_ever_pumped;
+int user32_ever_pumped(void) { return g_ever_pumped; }
+
 /* ------------------------------------------------------------------ */
 /* Window registry. Real Win32 binds the C++ window object to its HWND
  * through SetWindowLongPtr(hwnd, 0, obj) during WM_NCCREATE and reads it
@@ -298,6 +314,12 @@ void user32_key_direct(uint32_t vk, uint32_t sc, int down) {
  * was a black hole and the menus never saw input. */
 static void peek_msg(CPU *c) {
     uint32_t m = ARG(0);
+    /* first pump = the guest's real main loop is running (menus/missions);
+     * see user32_ever_pumped above for what this unlocks in the HUD */
+    if (!g_ever_pumped) {
+        g_ever_pumped = 1;
+        LOG("user32: first message pump - GUI/game loop is live");
+    }
     if (g_quit == 1) {
         /* deliver WM_QUIT once */
         memset(MEM + m, 0, 28);

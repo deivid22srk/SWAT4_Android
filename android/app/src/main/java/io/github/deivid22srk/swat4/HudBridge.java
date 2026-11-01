@@ -45,6 +45,14 @@ public final class HudBridge {
      * mouse while this bit is set (and the menu has never been seen). */
     public static final int MOVIE_BIT = 1 << 9;
 
+    /** poll() out[0] bit 10: the guest pumped its message queue WHILE a
+     * movie is open — the main menu running behind its background video
+     * (menus pump every frame; the intro Bink loop never pumps). The
+     * overlay latches everMenu on this and stops routing free-finger
+     * touches to the movie-skip ESC even when the object scan stays
+     * CTX_UNKNOWN (field shhxlog: every menu tap degraded to Esc). */
+    public static final int GUI_BIT = 1 << 10;
+
     private static volatile boolean sOk = false;
 
     static {

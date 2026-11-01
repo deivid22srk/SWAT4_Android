@@ -4,6 +4,7 @@ import android.content.Context;
 import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Paint;
+import android.graphics.Path;
 import android.graphics.RectF;
 import android.os.Handler;
 import android.os.Looper;
@@ -47,6 +48,10 @@ import java.io.IOException;
  * game's own Use range (hud_door_near), but the button itself never
  * hides and its F always fires.
  *
+ * The D-pad above the stick is the keyboard's arrow keys as four
+ * always-on buttons (chevron glyphs, WM key downs, auto-repeat while
+ * held), so menus navigate without the stick.
+ *
  * Every control sends the game's own input through HudBridge.post (a
  * lock-free SPSC ring drained by the game thread): mouse buttons, DIK key
  * state/taps, WM menu mouse. Nothing is simulated outside the game's real
@@ -69,7 +74,8 @@ public class HudOverlay extends View {
             DIK_UP = 0xC8, DIK_DOWN = 0xD0, DIK_LEFT = 0xCB, DIK_RIGHT = 0xCD;
 
     /* ---------------- button table ---------------- */
-    private static final int K_MHOLD = 0, K_MTAP = 1, K_KHOLD = 2, K_KTAP = 3, K_GRID = 4;
+    private static final int K_MHOLD = 0, K_MTAP = 1, K_KHOLD = 2, K_KTAP = 3, K_GRID = 4,
+            K_ARROW = 5;
 
     /** One HUD button: id, kind, target (DIK or mouse button), label, size
      * in u units. Rects live in bx/by/bw/bh (view px). */
@@ -85,7 +91,8 @@ public class HudOverlay extends View {
 
     private static final int B_FOGO = 0, B_CMD = 1, B_SLOTS = 2, B_USAR = 3, B_PORTA = 4,
             B_REC = 5, B_ZOOM = 6, B_MODO = 7, B_AGACH = 8, B_CORRER = 9, B_INCL = 10,
-            B_INCR = 11, B_TAB = 12, B_ESP = 13, B_ESC = 14, B_TROCA = 15, B_NBASE = 16;
+            B_INCR = 11, B_TAB = 12, B_ESP = 13, B_ESC = 14, B_TROCA = 15,
+            B_UP = 16, B_DOWN = 17, B_LEFT = 18, B_RIGHT = 19, B_NBASE = 20;
 
     private static final Btn[] BASE = {
             new Btn(B_FOGO, K_MHOLD, 0, 0, "FOGO", 150),
@@ -104,6 +111,10 @@ public class HudOverlay extends View {
             new Btn(B_ESP, K_KTAP, DIK_SPACE, -1, "ESP", 56),
             new Btn(B_ESC, K_KTAP, DIK_ESC, -1, "ESC", 64),
             new Btn(B_TROCA, K_KTAP, DIK_DEL, -1, "TROCA", 64),
+            new Btn(B_UP, K_ARROW, DIK_UP, -1, null, 56),
+            new Btn(B_DOWN, K_ARROW, DIK_DOWN, -1, null, 56),
+            new Btn(B_LEFT, K_ARROW, DIK_LEFT, -1, null, 56),
+            new Btn(B_RIGHT, K_ARROW, DIK_RIGHT, -1, null, 56),
     };
 
     /* Grid: 10 slots (1..0 or F1..F10 by page) + page chip (index 10). */
@@ -135,6 +146,7 @@ public class HudOverlay extends View {
         int btn = -1;          /* index into BASE, or -1 */
         float lx, ly;          /* last finger position (look deltas) */
         float sx, sy;          /* stick finger start (relative stick) */
+        long repAt;            /* repeat deadline for a held K_ARROW button */
     }
 
     private final Ptr[] ptrs = new Ptr[10];
@@ -147,9 +159,12 @@ public class HudOverlay extends View {
     private boolean doorNear;
     /** live: a Bink movie file is open (intro videos — runtime-reported). */
     private boolean movie;
-    /** latched once the main menu has been seen: the menu's own background
-     * video keeps the movie bit set, but from then on free fingers must
-     * stay the menu mouse, never the skip key. */
+    /** latched once the main menu has been seen — CTX_MENU from the object
+     * scan OR the GUI_BIT pump signal (the guest pumped its message queue
+     * while a movie is open: the menu behind its background video) — so a
+     * dead object scan can never reduce the whole session to the
+     * movie-skip key. From then on free fingers must stay the menu mouse,
+     * never the skip key. */
     private boolean everMenu;
     private int guestW, guestH;             /* guest client px (menu mapping) */
     private long menuArrowRepAt;            /* menu stick repeat deadline */
@@ -166,6 +181,8 @@ public class HudOverlay extends View {
     private final Paint pText = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint pCircle = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final RectF rf = new RectF();
+    /* D-pad chevron glyphs: built once per relayout, only stroked onDraw */
+    private final Path[] chev = new Path[4];
 
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final int[] pollOut = new int[3];
@@ -174,6 +191,7 @@ public class HudOverlay extends View {
     public HudOverlay(Context c, String gameDir) {
         super(c);
         for (int i = 0; i < ptrs.length; i++) ptrs[i] = new Ptr();
+        for (int i = 0; i < chev.length; i++) chev[i] = new Path();
         iniPath = gameDir == null ? null : new File(gameDir, "port/hud.ini").getAbsolutePath();
         loadCfg();
         setFocusable(false);
@@ -367,6 +385,26 @@ public class HudOverlay extends View {
         bx[B_ESC] = xr - e; by[B_ESC] = safeTop;
         bx[B_TROCA] = bx[B_ESC] - g - e; by[B_TROCA] = safeTop;
 
+        /* D-pad cluster: the keyboard's arrow keys, plus-shaped, above the
+         * lean buttons — menus navigate with real arrow keys, and the
+         * handed mirror below maps it to the other side like every button.
+         * X comes from the UNMIRRORED stick-zone center (anchorX is only
+         * assigned after that mirror), so the mirror lands the cluster
+         * exactly on the mirrored stick anchor. The cluster shrinks before
+         * it can clip above the screen: at scale 2.0 the naive 56u buttons
+         * pushed B_UP past y<0 (critic r1: unreachable and untouchable). */
+        float dp = 56 * u;
+        float span = by[B_INCL] - g - safeTop;  /* vertical room below the INC row */
+        if (3 * dp + 2 * g > span) dp = Math.max(1f, (span - 2 * g) / 3f);
+        bsz[B_UP] = bsz[B_DOWN] = bsz[B_LEFT] = bsz[B_RIGHT] = dp;
+        float ancX = zoneL + (zoneR - zoneL) * 0.5f;
+        by[B_UP] = by[B_INCL] - g - 3 * dp - 2 * g;
+        by[B_LEFT] = by[B_INCL] - g - 2 * dp - g;
+        by[B_DOWN] = by[B_INCL] - g - dp;
+        bx[B_UP] = bx[B_DOWN] = ancX - dp * 0.5f;
+        bx[B_LEFT] = ancX - dp * 0.5f - dp - g;
+        bx[B_RIGHT] = ancX + dp * 0.5f + g;
+
         if (cfgHanded) {
             for (int i = 0; i < B_NBASE; i++) {
                 float dist = bx[i] - safeLeft;
@@ -381,6 +419,37 @@ public class HudOverlay extends View {
         stickDead = 0.18f * stickR;
         anchorX = (zoneL + zoneR) * 0.5f;
         anchorY = zoneB - stickR - 14 * u;
+
+        /* chevron glyphs for the four D-pad buttons: rebuilt here, after
+         * the handed mirror changed bx[], so they always track the final
+         * rects; onDraw only strokes them (zero per-frame allocation) */
+        for (int i = B_UP; i <= B_RIGHT; i++) {
+            float x = bx[i], y = by[i], s2 = bsz[i];
+            Path p = chev[i - B_UP];
+            p.reset();
+            switch (i) {
+                case B_UP:
+                    p.moveTo(x + 0.32f * s2, y + 0.56f * s2);
+                    p.lineTo(x + 0.50f * s2, y + 0.38f * s2);
+                    p.lineTo(x + 0.70f * s2, y + 0.56f * s2);
+                    break;
+                case B_DOWN:
+                    p.moveTo(x + 0.32f * s2, y + 0.44f * s2);
+                    p.lineTo(x + 0.50f * s2, y + 0.62f * s2);
+                    p.lineTo(x + 0.70f * s2, y + 0.44f * s2);
+                    break;
+                case B_LEFT:
+                    p.moveTo(x + 0.58f * s2, y + 0.32f * s2);
+                    p.lineTo(x + 0.38f * s2, y + 0.50f * s2);
+                    p.lineTo(x + 0.58f * s2, y + 0.70f * s2);
+                    break;
+                default: /* B_RIGHT */
+                    p.moveTo(x + 0.42f * s2, y + 0.32f * s2);
+                    p.lineTo(x + 0.62f * s2, y + 0.50f * s2);
+                    p.lineTo(x + 0.42f * s2, y + 0.70f * s2);
+                    break;
+            }
+        }
 
         layoutGrid();
     }
@@ -423,7 +492,7 @@ public class HudOverlay extends View {
                 boolean nmov = (pollOut[0] & HudBridge.MOVIE_BIT) != 0;
                 guestW = pollOut[1];
                 guestH = pollOut[2];
-                if (nctx == HudBridge.CTX_MENU) everMenu = true;
+                if (nctx == HudBridge.CTX_MENU || (pollOut[0] & HudBridge.GUI_BIT) != 0) everMenu = true;
                 if (nctx != ctx) {
                     releaseAll(); /* buttons live everywhere: drop holds on any flip */
                     ctx = nctx;
@@ -450,6 +519,20 @@ public class HudOverlay extends View {
             long now = SystemClock.uptimeMillis();
             for (int i = nPend - 1; i >= 0; i--)
                 if (pendDue[i] <= now) fireRelease(i);
+            /* held D-pad arrows repeat exactly like a keyboard: WM keyup +
+             * keydown pairs on the same 280 ms cadence the menu stick uses */
+            boolean arrowRep = false;
+            for (Ptr q : ptrs) {
+                if (q.role == R_BTN && q.btn >= 0 && BASE[q.btn].kind == K_ARROW
+                        && q.repAt != 0) {
+                    if (now >= q.repAt) {
+                        HudBridge.post(HudBridge.EV_KEY, BASE[q.btn].dik, 0x100);
+                        HudBridge.post(HudBridge.EV_KEY, BASE[q.btn].dik, 0x100 | 1);
+                        q.repAt = now + 280;
+                    }
+                    arrowRep = true;
+                }
+            }
             if (menuArrowRepAt != 0) {
                 if (now >= menuArrowRepAt) {
                     repeatMenuArrow();
@@ -457,6 +540,8 @@ public class HudOverlay extends View {
                 }
                 handler.postDelayed(this, 16);
             } else if (nPend > 0) {
+                handler.postDelayed(this, 16);
+            } else if (arrowRep) {
                 handler.postDelayed(this, 16);
             }
         }
@@ -505,7 +590,7 @@ public class HudOverlay extends View {
                 boolean ndoor = (pollOut[0] & HudBridge.DOOR_BIT) != 0;
                 guestW = pollOut[1];
                 guestH = pollOut[2];
-                if (nctx == HudBridge.CTX_MENU) everMenu = true;
+                if (nctx == HudBridge.CTX_MENU || (pollOut[0] & HudBridge.GUI_BIT) != 0) everMenu = true;
                 movie = (pollOut[0] & HudBridge.MOVIE_BIT) != 0;
                 if (nctx != ctx) {
                     releaseAll();
@@ -690,6 +775,7 @@ public class HudOverlay extends View {
             p.role = R_NONE;
             p.id = 0;
             p.btn = -1;
+            p.repAt = 0;
         }
         stickHeld = false;
         stickVX = stickVY = 0;
@@ -733,6 +819,13 @@ public class HudOverlay extends View {
                 if (gridOpen) layoutGrid();
                 invalidate();
                 break;
+            case K_ARROW:
+                pressed[bi] = true;
+                HudBridge.post(HudBridge.EV_KEY, b.dik, 0x100 | 1); /* key down + WM */
+                p.repAt = SystemClock.uptimeMillis() + 280;
+                handler.removeCallbacks(tick);
+                handler.postDelayed(tick, 280);
+                break;
             default:
                 break;
         }
@@ -746,6 +839,11 @@ public class HudOverlay extends View {
         Btn b = BASE[bi];
         if (b.kind == K_MHOLD) HudBridge.post(HudBridge.EV_MBTN, b.mbtn, 0);
         else if (b.kind == K_KHOLD) HudBridge.post(HudBridge.EV_KEY, b.dik, 0);
+        else if (b.kind == K_ARROW) {
+            HudBridge.post(HudBridge.EV_KEY, b.dik, 0x100); /* WM keyup */
+            for (Ptr q : ptrs)
+                if (q.role == R_BTN && q.btn == bi) q.repAt = 0;
+        }
     }
 
     private void pressGrid(Ptr p, int gi) {
@@ -871,6 +969,16 @@ public class HudOverlay extends View {
         for (int i = 0; i < B_NBASE; i++) {
             drawBtn(canvas, BASE[i].label, bx[i], by[i], bsz[i], pressed[i],
                     i == B_PORTA && doorNear, alpha);
+        }
+        /* D-pad chevrons: the arrow buttons carry no text glyph (font
+         * coverage for such symbols varies across devices) — the prebuilt
+         * paths are only stroked here, never rebuilt per frame */
+        for (int i = B_UP; i <= B_RIGHT; i++) {
+            pStroke.setStrokeWidth(Math.max(2f, bsz[i] * 0.1f));
+            pStroke.setColor(pressed[i]
+                    ? Color.argb(Math.min(255, alpha + 70), 255, 255, 255)
+                    : Color.argb(alpha, 255, 255, 255));
+            canvas.drawPath(chev[i - B_UP], pStroke);
         }
         if (gridOpen) drawGrid(canvas, alpha);
     }

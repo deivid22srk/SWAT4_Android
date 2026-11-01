@@ -128,13 +128,14 @@ uint32_t hud_applied_events(void) { return hq_applied; }
 #include <jni.h>
 
 void user32_get_screen(int *w, int *h);
+int user32_ever_pumped(void);
 
-/* Returns 1 with out[0] = ctx | doorNear<<8 | movie<<9, out[1] = guest
- * client w, out[2] = guest client h. Safe any time: before the guest
- * boots the context is HUD_CTX_UNKNOWN and the client size is the last
- * known one. Reads plain ints written by the game thread — 32-bit
- * aligned loads are atomic on ARM; values are advisory (HUD layout),
- * never used for correctness of game state. */
+/* Returns 1 with out[0] = ctx | doorNear<<8 | movie<<9 | guiPump<<10,
+ * out[1] = guest client w, out[2] = guest client h. Safe any time: before
+ * the guest boots the context is HUD_CTX_UNKNOWN and the client size is the
+ * last known one. Reads plain ints written by the game thread — 32-bit
+ * aligned loads are atomic on ARM; values are advisory (HUD layout), never
+ * used for correctness of game state. */
 JNIEXPORT jboolean JNICALL
 Java_io_github_deivid22srk_swat4_HudBridge_poll(JNIEnv *env, jclass cls,
                                                 jintArray out) {
@@ -146,6 +147,13 @@ Java_io_github_deivid22srk_swat4_HudBridge_poll(JNIEnv *env, jclass cls,
     v[0] = (jint)hud_game_ctx();
     if (hud_door_near(128.0f, NULL)) v[0] |= 1 << 8; /* game's own door Range */
     if (hud_movie_playing()) v[0] |= 1 << 9; /* a .bik is open: intro video */
+    /* A pump WHILE a movie is open = the main menu running behind its
+     * background video (menus pump every frame; the intro Bink loop never
+     * pumps - bnlog iutlog). The Java overlay latches "menu seen" on this
+     * and stops turning free-finger touches into the movie-skip ESC even
+     * when the object scan stays UNKNOWN (field shhxlog: ctx never left 0,
+     * so every menu tap degraded to Esc and no mode could be entered). */
+    if (hud_movie_playing() && user32_ever_pumped()) v[0] |= 1 << 10;
     int w, h;
     user32_get_screen(&w, &h);
     v[1] = (jint)w;

@@ -67,6 +67,9 @@ static uint32_t s_cls;              /* cached UClass* of ASwatPlayer */
 static uint32_t s_cls_door;         /* cached UClass* of ASwatDoor */
 static uint32_t s_gen;              /* scan generation (diagnostics) */
 static int s_entry_pawn;            /* pawn lives in the Entry map package */
+/* Last scan's raw probes for hud_scan_diag(): bail code + the values the
+ * failing check actually read (see hud_state.h for the codes). */
+static uint32_t s_diag[4];
 
 /* Doors are static geometry: positions are read once per scan into this
  * fixed table (no allocation). 32 covers SWAT 4 mission maps with margin;
@@ -83,6 +86,17 @@ static uint32_t r32(uint32_t a) {
 
 static int in_heap(uint32_t a) { return a >= HEAP_LO && a < HEAP_HI; }
 
+/* Record a bail (code != 0) or a completed scan (0) with the raw values
+ * the decision was made from. No logging here: hud_state.cpp stays pure
+ * (the selftest compiles it without the runtime's LOG); platform_sdl.c
+ * prints one-shot per distinct state. */
+static void diag(uint32_t code, uint32_t cls, uint32_t num, uint32_t data) {
+    s_diag[0] = code;
+    s_diag[1] = cls;
+    s_diag[2] = num;
+    s_diag[3] = data;
+}
+
 void hud_set_guest_mem(const void *mem) {
     s_mem = (const uint8_t *)mem;
 }
@@ -90,6 +104,10 @@ void hud_set_guest_mem(const void *mem) {
 int hud_game_ctx(void) { return s_ctx; }
 
 uint32_t hud_scan_gen(void) { return s_gen; }
+
+void hud_scan_diag(uint32_t out[4]) {
+    if (out) memcpy(out, s_diag, sizeof s_diag);
+}
 
 uint32_t hud_pawn(void) { return s_pawn; }
 
@@ -136,17 +154,24 @@ static void scan(void) {
     s_ndoors = 0;
     s_entry_pawn = 0;
     s_gen++;
-    if (!s_mem) { s_ctx = HUD_CTX_UNKNOWN; return; }
+    if (!s_mem) { diag(1, 0, 0, 0); s_ctx = HUD_CTX_UNKNOWN; return; }
     uint32_t cls = r32(SWATGAME_BASE + RVA_CLS_SWATPLAYER); /* module .data slot */
     uint32_t cls_door = r32(SWATGAME_BASE + RVA_CLS_SWATDOOR);
-    if (!in_heap(cls)) { s_ctx = HUD_CTX_UNKNOWN; return; } /* not registered yet */
+    if (!in_heap(cls)) { diag(2, cls, 0, 0); s_ctx = HUD_CTX_UNKNOWN; return; } /* not registered yet */
     uint32_t arr = CORE_BASE + RVA_GOBJOBJECTS;
     uint32_t data = r32(arr), num = r32(arr + 4);
     if (!num || num > GOBJ_NUM_CAP || !in_heap(data) ||
         data + num * 4 < data || data + num * 4 >= HEAP_HI) {
+        /* code 3 = count bad, 4 = data pointer not a heap address, 5 = both
+         * sane but the array range leaves the heap window (critic r1: the
+         * first draft collapsed wrap/range into 4 and would have sent the
+         * next debugger to the wrong check) */
+        diag(!num || num > GOBJ_NUM_CAP ? 3 : !in_heap(data) ? 4 : 5,
+             cls, num, data);
         s_ctx = HUD_CTX_UNKNOWN;
         return;
     }
+    diag(0, cls, num, data);
     s_cls = cls;
     s_cls_door = in_heap(cls_door) ? cls_door : 0;
     for (uint32_t i = 0; i < num; i++) {
@@ -233,6 +258,7 @@ void hud_state_reset_for_tests(void) {
     s_entry_pawn = 0;
     memset(s_pawn_loc, 0, sizeof s_pawn_loc);
     memset(s_doors, 0, sizeof s_doors);
+    memset(s_diag, 0, sizeof s_diag);
 }
 
 void hud_set_scan_interval(uint32_t ms) { s_interval = ms; }

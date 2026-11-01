@@ -1386,3 +1386,72 @@ não há controle — teclado OK (ESC abriu "Quit to Windows?"), mouse morto.
 * Se após uma missão o menu clicar com desvio constante, o log mostrará
   `steers` subindo com `cur` nos alvos — premissa falsada; a correção é
   o modelo track-all + clamp (uma linha de inversão, já planejada).
+
+## 2026-11-01 — shhxlog: cada toque virava Esc no menu (nenhum modo entrava) + D-pad do teclado
+
+Pedido do usuário: "Cada clique o deslize na tela a ação tá sendo executada
+como Esc ao invés de... mover o mouse... e ao o mouse tá em cima de um opção
+exemplo carrear e clica na tela ele executa o clique do mouse como se fosse
+em um Pc" + "sinto falta daqueles botões cima baixo esquerda e direita no hud".
+
+### Causa raiz (prova no shhxlog, build 8c5483a)
+
+* `hud: ctx -1 -> 0 (gen 7 pawn 0 doors 0 entry 0)` e o log TERMINA no menu
+  principal: o scan de objetos saiu UNKNOWN a sessão inteira — bases de
+  módulo corretas (Core 0x01000000, SwatGame 0x03200000 no próprio log),
+  alocações todas na banda 0x4x-0x5x (aceita desde 925d813) — o motivo do
+  bail era invisível (bail silencioso).
+* Com scan morto, `everMenu` nunca trava; o vídeo de fundo do menu mantém
+  MOVIE_BIT=1; o ramo `movie && !everMenu` do `down()` then converte CADA
+  toque livre na tecla de pular vídeo (ESC). O maquinário do menu-mouse
+  (steer DI + WM, 8c5483a/c505e70) nunca chega a rodar.
+
+### Correção (processo multiagente pedido pelo usuário: 1 agente de correção Java + 2 críticos r1 + integração)
+
+1. **Trava pela bomba de mensagens (runtime, independe do scan)**:
+   `user32.c` trava `g_ever_pumped` no primeiro PeekMessageA/W do guest
+   (menus/missões bombeiam a cada frame; o loop Bink NUNCA bombeia — bnlog
+   iutlog). `hud_jni.c poll()` expõe bit 10 = `movie && pumped` = menu
+   rodando atrás do vídeo de fundo. Java trava `everMenu` em CTX_MENU OU
+   GUI_BIT (HudBridge.GUI_BIT) nos DOIS pontos de poll. Depois da trava,
+   dedo livre = mouse do jogo (EV_MMOVE arrasto + EV_MENUCLICK toque) em
+   TODOS os contextos não-missão — mesmo com o scan morto.
+2. **Diagnóstico do bail silencioso**: `hud_scan_diag()` (hud_state.h/.cpp)
+   registra código (0 ok, 1 sem memória, 2 slot de classe, 3 num, 4 data,
+   5 range) + valores crus (cls/num/data); platform_sdl.c loga one-shot por
+   estado: `hud scan: bail %u cls %08x num %u data %08x`. O próximo log de
+   campo finalmente mostra POR QUE o scan não sai do UNKNOWN (necessário
+   para look vs mouse em missão e proximidade de porta).
+3. **D-pad (cima/baixo/esquerda/direita)**: 4 botões novos (K_ARROW,
+   DIK_UP/DOWN/LEFT/RIGHT), semicírculo em cruz acima dos botões de
+   inclinação, espelhado no modo canhoto, glifos em Path pré-alocado
+   (sem dependência de fonte), manter pressionado repete a cada 280 ms
+   (par keyup+keydown WM, mesmo cadência do seta-do-stick no menu),
+   soltar solta a tecla. Visíveis e ativos em todos os contextos.
+   O cluster ENCOLHE antes de sair da tela (crítico r1 Java: em scale 2.0
+   o B_UP ficava em y=-186 e nunca podia ser tocado; agora ancora em
+   safeTop).
+
+### Validação
+
+* `sh scripts/test_hud.sh`: hud_jni selftest ok, hud_state selftest ok,
+  17 blocos behav ok (vinput/dinput, incluindo skip de vídeo via
+  user32_key_direct intacto).
+* `scripts/check_java.sh` (ecj + stubs): HudBridge+HudOverlay, 0 erros.
+* Crítica: agente r1 runtime 8/10 (nada bloqueante; correção do código 5 do
+  diag aplicada); agente r1 Java 8/10 (1 bloqueador: clipping do D-pad em
+  scale>1.55 — corrigido com encolhimento do cluster; verificado à mão em
+  scale 1.0/1.5/2.0: by[B_UP] nunca < safeTop, sem overlap com INC).
+* A verificação de campo fica por conta de duas linhas novas no log:
+  `user32: first message pump - GUI/game loop is live` (deve aparecer no
+  menu, NÃO durante os vídeos) e `hud scan: bail ...`.
+
+### O que esperar no aparelho
+
+* Menu: arrastar o dedo move o cursor da GUI (stream DI, c505e70) e o
+  toque clica onde o dedo está — Career/Instant Action/etc como num PC.
+* Tocar durante os vídeos de abertura continua pulando (a trava só sobe
+  com a bomba de mensagens; os vídeos não bombeiam).
+* D-pad: navega qualquer lista/foco de menu com setas reais do teclado.
+* Missão: dedo livre continua olhar (R_LOOK); o D-pad envia as setas
+  (sem bind em missão, inofensivo).

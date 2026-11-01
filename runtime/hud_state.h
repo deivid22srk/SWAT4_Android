@@ -27,6 +27,16 @@ const uint32_t *hud_pawn_loc(void);   /* 3 raw float bits: X Y Z, or NULL */
  * with the evidence behind them (pawn/doors/level) once per second at most. */
 uint32_t hud_scan_gen(void);
 
+/* Last scan's raw probe values for the field log (platform_sdl.c prints
+ * them one-shot per distinct state). Field shhxlog showed the scan bailing
+ * to UNKNOWN for the WHOLE session with no visible reason; these values
+ * close that gap. out[0] = bail code (0 scan completed, 1 no guest memory,
+ * 2 player class slot not a heap pointer, 3 object count out of range,
+ * 4 array data not a heap pointer, 5 array range overflows the heap),
+ * out[1] = the class slot value read, out[2] = object count read,
+ * out[3] = the array data pointer read. */
+void hud_scan_diag(uint32_t out[4]);
+
 /* Doors (stage 3): refreshed on each scan (1 s), positions are static. */
 int hud_door_count(void);
 /* 1 when the last scan dropped a pawn because it sat in the Entry package

@@ -404,6 +404,20 @@ void platform_present_hook(void) {
                 hud_door_count(), hud_pawn_entry());
             lctx = hud_game_ctx();
         }
+        {   /* why the object scan bails (or that it completed): raw probes,
+             * one-shot per distinct state — field shhxlog ended with the
+             * scan UNKNOWN for the whole session and no way to see which
+             * check failed (codes in hud_state.h) */
+            extern void hud_scan_diag(uint32_t *);
+            uint32_t dg[4];
+            hud_scan_diag(dg);
+            static uint32_t lbail = 0xFFFFFFFFu;
+            if (dg[0] != lbail) {
+                LOG("hud scan: bail %u cls %08x num %u data %08x",
+                    dg[0], dg[1], dg[2], dg[3]);
+                lbail = dg[0];
+            }
+        }
     }
     if (g_frames % 60 == 0) fflush(stderr);  /* fully buffered log: periodic flush */
     {   /* canary: the main thread's static TLS pointer (TEB slot 0 +0x2C) */
