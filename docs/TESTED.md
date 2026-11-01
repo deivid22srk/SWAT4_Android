@@ -1455,3 +1455,73 @@ em um Pc" + "sinto falta daqueles botões cima baixo esquerda e direita no hud".
 * D-pad: navega qualquer lista/foco de menu com setas reais do teclado.
 * Missão: dedo livre continua olhar (R_LOOK); o D-pad envia as setas
   (sem bind em missão, inofensivo).
+
+## 2026-11-01 — njdjport: fecha ao entrar no modo Carreira (SP-FoodWall) + texto destacado "meio branco"
+
+### Análise do log (112 MB) e do vídeo
+
+* **Crash na entrada da Carreira**: o jogo carrega SP-FoodWall, cria o mundo
+  físico do Havok, enumera 3 ragdolls (`..\HavokData\*.hke` — SWATofficer_rd,
+  PaperTarget_rd, HotelSuitBag_rd) e morre com `FATAL: no recompiled code at
+  00000010 (return address 0173b9eb)`. Backtrace: Engine.dll+0x33B810 (dispatch
+  de criadores via `[tabela + (linha*32+col)*4 + 0x18c]` — importador de texto
+  do Havok, chamado por `HkLevelData::readFromFile`), correntes 0x34F080 /
+  0x33BE00 / 0x32B120 / 0x32D090 / 0x314B80 (RB_COLLECTION) / 0x312C80 /
+  0x30FFD0 (WORLD/BEGIN_WORLD).
+* **Causa raiz**: logo antes do crash o heap detecta `CORRUPTION #1` — o header
+  do bloco em 20848d18 foi sobrescrito com floats do jogo (0.2f, 10.0f,
+  -152.5f, 48.57f...). O ring mostra que o último evento foi `alloc 20846c90
+  size=8328` (8328 = 694 × FVector) e 20848d18 é exatamente o fim desse bloco:
+  **o convidado estourou o fim de uma alocação de 8328 bytes com dados
+  analisados do ragdoll e destruiu o header vizinho + objetos vivos**; a
+  quarentena salvou o alocador, mas o objeto corrompido morreu no virtual call.
+  O .mopp nunca chegou a ser aberto (o crash é antes da leitura do arquivo).
+* **"Meio branco"**: no vídeo, o item selecionado do menu ("TRAINING",
+  "SETTINGS") renderiza parte branco/parte amarelo com corte vertical
+  no meio da palavra, e no loading o texto "LOADING" só mostra o contorno
+  (preenchimento ausente). O menu roda a **30 FPS** (300 frames por 10 s no
+  heartbeat do log), então não é lentidão de quadros: é o preenchimento
+  destacado sendo desenhado com textura/estado errado (varredura travada).
+  Nesta rodada entram diagnósticos dirigidos (abaixo) para fechar a causa na
+  próxima coleta.
+
+### Correções
+
+* **Contenção de overrun no heap (runtime/heap.c)** — o mesmo remédio que o
+  alocador do Windows dá sem querer: alocações de 512+ bytes ganham folga de
+  cauda (arredondamento 64 B + registro de 16 B {magic, n pedido, magic,
+  magic} no fim). Um overrun pequeno cai na folga e **não destrói mais o
+  header vizinho**; `gsize`/`HeapSize` continuam reportando o tamanho pedido;
+  no `gfree` o registro é verificado e o estouro é reportado com a identidade
+  do bloco (`heap: OVERRUN block ... req=...`). Registro com magic destruído =
+  bloco vazado (extensão desconhecida) + relatório; o alocador segue são.
+* **Diagnóstico do bad call (runtime/dispatch.c)**: quando o alvo é minúsculo
+  (<0x10000), despeja registradores + a janela da tabela ao redor de
+  `[ecx + esi*4 + 0x18c]` (limitado a 8 despejos) — a próxima ocorrência mostra
+  o estado do registro do Havok inteiro no log.
+* **Rastro de stdio (runtime/msvcrt.c)**: fopen/_wfopen/fread com caminho,
+  modo e resultado (limitado) — a leitura dos .hke era invisível no log (só o
+  rastro Win32 aparecia).
+* **Rastro de textura (d3d9_bridge/bcemu)**: CreateTexture com formato,
+  tamanho, uso e pool (64 primeiras + todas as falhas) e LockRect de texturas
+  pequenas (48 primeiras) — revela como as páginas de fonte e o gradiente
+  destacado são carregados/atualizados.
+
+### Validação
+
+* `sh tools/test_heap.sh`: 2 cenários novos — `test_overrun_containment`
+  (reproduz o overrun de 8328 B + 24 B de floats: contido, sem corrupção,
+  reportado, heap vivo) e `test_overrun_huge` (registro destruído: bloco
+  vazado, alocador são). **ALL PASS**, incl. stress multi-thread.
+* `sh scripts/test_hud.sh`: hud_jni ok, hud_state ok, 17 blocos behav ok.
+* Sintaxe: gcc/g++ `-fsyntax-only` limpos em heap.c, dispatch.c, msvcrt.c,
+  d3d9_bcemu.cpp, d3d9_bridge.cpp.
+
+### O que esperar no aparelho
+
+* **O modo Carreira não deve mais fechar ao carregar** — o overrun cai na
+  folga; se o jogo depender dos bytes que estouraram (não deve), o comportamento
+  será visível de outra forma e o log dirá exatamente que bloco estourou.
+* No log: `heap: OVERRUN ...` identifica o estourador pela combinação
+  endereço+tamanho (o ring mostra a vizinhança); `fopen/fread` mostram os
+  .hke lidos; `d3d9: CreateTexture/lock` mostram as páginas de fonte.

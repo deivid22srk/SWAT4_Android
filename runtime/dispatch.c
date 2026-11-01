@@ -165,6 +165,26 @@ void rt_call(CPU *c, uint32_t t) {
             fprintf(stderr, "  [arg0] = %08x %08x %08x %08x\n", vt, M32(a0 + 4), M32(a0 + 8), M32(a0 + 12));
             if (vt >= 0x10000) fprintf(stderr, "  vtbl: %08x %08x %08x ... [19]=%08x\n", M32(vt), M32(vt + 4), M32(vt + 8), M32(vt + 0x4c));
         }
+        /* njdjport: the Havok .hke importer dispatches creators through
+         * [table + (row*32+col)*4 + 0x18c] (row/col from two virtual calls).
+         * When the loaded function pointer is tiny, dump the table window it
+         * came from so the registry state is visible in the log. r1=ecx held
+         * M32(P) (the table), r6=esi the combined index at the call site. */
+        static uint32_t badcall_dumps;
+        if (t < 0x10000 && badcall_dumps < 8) {
+            badcall_dumps++;
+            uint32_t tab = c->r[1], idx = c->r[6];
+            fprintf(stderr, "  regs eax=%08x ecx=%08x edx=%08x ebx=%08x ebp=%08x esi=%08x edi=%08x\n",
+                    c->r[0], c->r[1], c->r[2], c->r[3], c->r[5], c->r[6], c->r[7]);
+            if (tab > 0x10000 && tab < 0x40000000u) {
+                fprintf(stderr, "  table %08x: window around [esi*4+0x18c] (idx=%08x):\n", tab, idx);
+                for (int k = -4; k <= 11; k++) {
+                    int64_t a = (int64_t)tab + 0x18c + ((int64_t)idx << 2) + 4 * k;
+                    if (a >= 0x10000 && a < 0x40000000u)
+                        fprintf(stderr, "    %s[%+d]: %08x\n", k == 0 ? "target" : "      ", k, M32((uint32_t)a));
+                }
+            }
+        }
         rt_fatal("no recompiled code at %08x (return address %08x)", t, ret);
     }
     fn(c);

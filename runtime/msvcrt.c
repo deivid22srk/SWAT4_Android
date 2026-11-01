@@ -323,17 +323,32 @@ static void w2a_local(uint32_t w, char *out, size_t n) {
     for (; i + 1 < n && M16(w + 2 * i); i++) out[i] = (char)M16(w + 2 * i);
     out[i] = 0;
 }
+/* njdjport diagnostics: the Havok .hke parser reads its ragdoll files through
+ * stdio, which was invisible in the log (CreateFileA traces only cover the
+ * Win32 layer). Bounded: the first calls of each kind, then quiet. */
+static uint32_t g_fopen_traced, g_fread_traced;
 SHIM(fopen) {
     char host[1024];
     rt_host_path(GSTR(ARG(0)), host, sizeof host);
-    RETC(mkcf(fopen(host, GSTR(ARG(1)) ? GSTR(ARG(1)) : "rb")));
+    FILE *f = fopen(host, GSTR(ARG(1)) ? GSTR(ARG(1)) : "rb");
+    if (g_fopen_traced < 48) {
+        g_fopen_traced++;
+        TRACE("fopen(%s, %s) = %p", GSTR(ARG(0)) ? GSTR(ARG(0)) : "(null)",
+              GSTR(ARG(1)) ? GSTR(ARG(1)) : "rb", (void *)f);
+    }
+    RETC(mkcf(f));
 }
 SHIM(_wfopen) {
     char path[1024], mode[16], host[1024];
     w2a_local(ARG(0), path, sizeof path);
     w2a_local(ARG(1), mode, sizeof mode);
     rt_host_path(path, host, sizeof host);
-    RETC(mkcf(fopen(host, mode[0] ? mode : "rb")));
+    FILE *f = fopen(host, mode[0] ? mode : "rb");
+    if (g_fopen_traced < 64) {
+        g_fopen_traced++;
+        TRACE("_wfopen(%s, %s) = %p", path, mode[0] ? mode : "rb", (void *)f);
+    }
+    RETC(mkcf(f));
 }
 SHIM(fclose) {
     FILE *h = cf(ARG(0));
@@ -343,7 +358,12 @@ SHIM(fclose) {
 }
 SHIM(fread) {
     FILE *h = cf(ARG(3));
-    RETC(h ? fread(MEM + ARG(0), ARG(1), ARG(2), h) : 0);
+    size_t got = h ? fread(MEM + ARG(0), ARG(1), ARG(2), h) : 0;
+    if (h && g_fread_traced < 64) {
+        g_fread_traced++;
+        TRACE("fread(buf=%08x, %u x %u) = %zu", ARG(0), ARG(1), ARG(2), got);
+    }
+    RETC(got);
 }
 SHIM(fwrite) {
     FILE *h = cf(ARG(3));

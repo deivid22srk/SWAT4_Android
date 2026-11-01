@@ -694,6 +694,20 @@ void lock_rect_common(CPU *c, void *obj, uint32_t sub, const D3DSURFACE_DESC &de
                       std::function<void(const uint8_t *)> upload = nullptr,
                       const char *tag = "tex-rect") {
     if (FAILED(hr)) { M32(out) = 0; M32(out + 4) = 0; return; }
+    /* njdjport diagnostics: font pages and GUI gradients are small textures;
+     * their lock pattern reveals how the menu highlight fill is updated. */
+    {
+        static uint32_t small_locks_logged;
+        size_t rb = rect_bytes(desc, r, lr.Pitch);
+        if (rb <= 256 * 1024 && small_locks_logged < 48) {
+            small_locks_logged++;
+            LOG("d3d9: %s lock obj=%p sub=%u %ux%u fmt=%u rect=%s[%ld,%ld,%ld,%ld] "
+                "pitch=%d bytes=%zu flags=%08x pool=%u",
+                tag, obj, sub, desc.Width, desc.Height, (unsigned)desc.Format,
+                r ? "" : "full", r ? r->left : 0, r ? r->top : 0, r ? r->right : 0,
+                r ? r->bottom : 0, lr.Pitch, rb, (unsigned)flags, (unsigned)desc.Pool);
+        }
+    }
     if (desc.Pool != D3DPOOL_SYSTEMMEM || r) upload = nullptr;
     uint32_t g = shadow_begin(obj, sub, lr.pBits, rect_bytes(desc, r, lr.Pitch), flags, upload, tag);
     M32(out) = (uint32_t)lr.Pitch;

@@ -146,6 +146,15 @@ void B_IDirect3DDevice9_CreateTexture(CPU *c) {
     IDirect3DTexture9 *t = nullptr;
     HRESULT hr = d->CreateTexture(ARG(1), ARG(2), ARG(3), ARG(4), emu ? D3DFMT_A8R8G8B8 : fmt,
                                   (D3DPOOL)ARG(6), &t, nullptr);
+    /* njdjport diagnostics: which formats/sizes the GUI fonts and highlight
+     * textures use, so a failed/odd page shows up in the log. Bounded. */
+    static uint32_t tex_creates_logged, tex_fails_logged;
+    if (SUCCEEDED(hr) ? tex_creates_logged < 64 : tex_fails_logged < 16) {
+        if (SUCCEEDED(hr)) tex_creates_logged++; else tex_fails_logged++;
+        LOG("d3d9: CreateTexture %ux%u lvl=%u usage=%08x fmt=%u pool=%u -> hr=%08x%s",
+            ARG(1), ARG(2), ARG(3), ARG(4), (unsigned)fmt, ARG(6), (unsigned)hr,
+            emu ? " (BC emu)" : "");
+    }
     if (SUCCEEDED(hr) && emu) {
         std::lock_guard<std::mutex> l(g_bc_lock);
         g_tex[t] = BcTex{fmt};

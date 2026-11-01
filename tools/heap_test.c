@@ -63,6 +63,47 @@ static void test_smoke(void) {
     gfree(0); /* no-op */
 }
 
+/* njdjport: the SP-FoodWall load overran an 8328-byte allocation with float
+ * data and smashed the next header. Padded blocks must contain that overrun
+ * in the tail slack, report it on free, and keep the chain intact. */
+static void test_overrun_containment(void) {
+    uint32_t baseline = g_corrupt_events;
+    uint32_t p = gmalloc(8328);
+    CHECK(p && (p & 15) == 0, "padded alloc 8328 -> %08x", p);
+    CHECK(gsize(p) == 8328, "gsize reports the requested size (%u)", gsize(p));
+    for (int i = 0; i < 8328; i++) M8(p + i) = (uint8_t)i;
+    /* the game's overrun: 24 bytes of "physics floats" past the end */
+    M32(p + 8328) = 0x42424b6b; M32(p + 8332) = 0x3e4ccccd;
+    M32(p + 8336) = 0x41200000; M32(p + 8340) = 0xc3188218;
+    M32(p + 8344) = 0x80000000; M32(p + 8348) = 0x00000000;
+    gfree(p);
+    CHECK(g_corrupt_events == baseline,
+          "overrun contained: no allocator corruption (events %u -> %u)",
+          baseline, g_corrupt_events);
+    uint32_t q = gmalloc(8328);
+    CHECK(q != 0, "heap alive after contained overrun (q=%08x)", q);
+    CHECK(gsize(q) == 8328, "post-overrun alloc reports 8328 (%u)", gsize(q));
+    gfree(q);
+    /* small allocs stay unpadded: no tail record to confuse gsize */
+    uint32_t s = gmalloc(100);
+    CHECK(gsize(s) >= 100, "small alloc unpadded (gsize=%u)", gsize(s));
+    gfree(s);
+}
+
+/* The pad tail must catch a write past the slack too (record smashed): the
+ * block is leaked, the allocator stays consistent, the report fires. */
+static void test_overrun_huge(void) {
+    uint32_t baseline = g_corrupt_events;
+    uint32_t p = gmalloc(512);
+    CHECK(p && gsize(p) == 512, "padded alloc 512 -> %08x", p);
+    for (uint32_t i = 0; i < 512 + 256; i++) M8(p + i) = 0x41; /* far past the end */
+    gfree(p);
+    CHECK(g_corrupt_events == baseline, "huge overrun leaks the block without corruption");
+    uint32_t q = gmalloc(512);
+    CHECK(q != 0 && gsize(q) == 512, "allocator healthy after huge overrun (q=%08x)", q);
+    gfree(q);
+}
+
 static void test_bins(void) {
     uint32_t a = gmalloc(0x100), b = gmalloc(0x100), c = gmalloc(0x100);
     CHECK(a && b && c, "bump allocs a=%08x b=%08x c=%08x", a, b, c);
@@ -204,6 +245,8 @@ int main(void) {
     test_wrap_quarantine();
     test_gbigalloc();
     test_smoke();
+    test_overrun_containment();
+    test_overrun_huge();
     test_bins();
     test_link_corruption();
     test_bad_frees();

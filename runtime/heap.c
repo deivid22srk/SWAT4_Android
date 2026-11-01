@@ -37,6 +37,25 @@
 #define MINBLK 32u
 #define NBINS 48
 #define F_USED 1u
+#define F_PADDED 2u
+
+/* ---- overrun containment (njdjport crash) ----
+ * During the SP-FoodWall (career) load the guest overran an 8328-byte
+ * allocation with parsed Havok float data, smashing the next block header
+ * (20848d18) and a live C++ object; the hardening quarantine kept the
+ * allocator alive but the corrupted object still died on a virtual call
+ * ("no recompiled code at 00000010"). Windows-style allocator slack absorbs
+ * exactly this class of small overrun, so every allocation of 512+ bytes now
+ * carries a tail: 0xA5-filled slack up to a 64-byte block rounding plus a
+ * 16-byte record {magic, requested n, magic, magic} at the very end. The
+ * overrun lands in the slack (game survives), gsize/HeapSize still report the
+ * requested size, and gfree verifies the record and reports the overrun with
+ * the block identity so the writer can be pinpointed from the log. */
+#define PAD_MIN 512u
+#define PAD_ALIGN 64u
+#define TAIL 16u
+#define TAIL_MAGIC 0xA5A5A5A5u
+#define TAIL_N(p) (M32((p) + 4))
 
 static pthread_mutex_t g_heap_lock = PTHREAD_MUTEX_INITIALIZER;
 static uint32_t g_top = GUEST_HEAP_BASE + 8; /* first block header; payload 16-aligned */
@@ -60,7 +79,33 @@ void gmalloc_set_tag(const char *tag) { t_tag = tag; }
 
 #define BSIZE(b) (M32((b) + 4) & ~15u)
 #define BUSED(b) (M32((b) + 4) & F_USED)
+#define BPADDED(b) (M32((b) + 4) & F_PADDED)
 #define BPREV(b) (M32(b))
+
+/* Tail record sits in the last 16 bytes of a padded block's payload area. */
+static inline uint32_t tail_addr(uint32_t b) { return b + BSIZE(b) - TAIL; }
+
+static void pad_write_tail(uint32_t b, uint32_t n) {
+    uint32_t t = tail_addr(b);
+    uint32_t fill_start = b + HDR + n, fill_end = t;
+    if (fill_end > fill_start) memset(MEM + fill_start, 0xA5, fill_end - fill_start);
+    M32(t) = TAIL_MAGIC; TAIL_N(t) = n; M32(t + 8) = TAIL_MAGIC; M32(t + 12) = TAIL_MAGIC;
+}
+
+/* Returns bytes the guest wrote past its requested size: the distance from the
+ * first non-0xA5 byte in the slack to the tail record (an extent estimate),
+ * 0 if the slack is intact, or 0xFFFFFFFF when the record itself is smashed. */
+static uint32_t pad_check(uint32_t b, uint32_t *req) {
+    uint32_t t = tail_addr(b);
+    if (M32(t) != TAIL_MAGIC || M32(t + 8) != TAIL_MAGIC || M32(t + 12) != TAIL_MAGIC) {
+        *req = TAIL_N(t); return 0xFFFFFFFFu; /* record itself smashed: big overrun */
+    }
+    *req = TAIL_N(t);
+    if (*req > BSIZE(b) - HDR - TAIL) return 0xFFFFFFFFu; /* insane req: distrust all */
+    uint32_t p = b + HDR + *req;
+    while (p < t && M8(p) == 0xA5) p++;
+    return p < t ? t - p : 0;
+}
 #define NEXTF(b) M32((b) + 8)
 #define PREVF(b) M32((b) + 12)
 
@@ -176,6 +221,7 @@ static void set_block(uint32_t b, uint32_t size, int used) {
 uint32_t gmalloc(uint32_t n) {
     uint32_t need = (n + HDR + 15) & ~15u;
     if (need < MINBLK) need = MINBLK;
+    if (n >= PAD_MIN) need = ((need + PAD_ALIGN - 1) & ~(PAD_ALIGN - 1)) + TAIL;
     if (n > 0x7FFFFFFF) return 0;
     pthread_mutex_lock(&g_heap_lock);
     int rebuilt = 0;
@@ -207,6 +253,7 @@ restart:
                 } else {
                     set_block(b, sz, 1);
                 }
+                if (n >= PAD_MIN) { M32(b + 4) |= F_PADDED; pad_write_tail(b, n); }
                 uint32_t ret = b + HDR;
                 ring_note(ret, n, 0);
                 pthread_mutex_unlock(&g_heap_lock);
@@ -225,6 +272,7 @@ restart:
     g_top += need;
     set_block(b, need, 1);
     g_last_block = b;
+    if (n >= PAD_MIN) { M32(b + 4) |= F_PADDED; pad_write_tail(b, n); }
     uint32_t ret = b + HDR;
     ring_note(ret, n, 0);
     pthread_mutex_unlock(&g_heap_lock);
@@ -249,6 +297,23 @@ void gfree(uint32_t p) {
         heap_corrupt("double free", p, 0, 0);
         pthread_mutex_unlock(&g_heap_lock);
         return;
+    }
+    if (BPADDED(b)) {
+        uint32_t req, over = pad_check(b, &req);
+        static uint32_t overrun_reports;
+        if (over == 0xFFFFFFFFu) {
+            if (++overrun_reports <= 8) {
+                LOG("heap: OVERRUN block %08x (req %u): tail record smashed - guest "
+                    "wrote far past the end; block leaked, heap unaffected", b, req);
+                ring_dump(b);
+            }
+            pthread_mutex_unlock(&g_heap_lock);
+            return; /* true extent unknown: leak instead of corrupting the chain */
+        } else if (over && ++overrun_reports <= 8) {
+            LOG("heap: OVERRUN block %08x req=%u: guest wrote at least %u bytes past "
+                "its requested size (contained in slack, no heap damage)", b, req, over);
+            ring_dump(b);
+        }
     }
     uint32_t sz = BSIZE(b);
     /* merge with next */
@@ -301,7 +366,12 @@ uint32_t gsize(uint32_t p) {
         pthread_mutex_unlock(&g_heap_lock);
         return 0;
     }
-    uint32_t r = BSIZE(b) - HDR;
+    uint32_t r;
+    if (BPADDED(b)) {
+        uint32_t t = tail_addr(b);
+        if (M32(t) == TAIL_MAGIC && M32(t + 8) == TAIL_MAGIC && TAIL_N(t) <= BSIZE(b) - HDR - TAIL) r = TAIL_N(t);
+        else { heap_corrupt("gsize padded tail", p, 0, 0); r = BSIZE(b) - HDR; }
+    } else r = BSIZE(b) - HDR;
     pthread_mutex_unlock(&g_heap_lock);
     return r;
 }
