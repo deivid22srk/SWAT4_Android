@@ -28,13 +28,19 @@ const uint32_t *hud_pawn_loc(void);   /* 3 raw float bits: X Y Z, or NULL */
 uint32_t hud_scan_gen(void);
 
 /* Last scan's raw probe values for the field log (platform_sdl.c prints
- * them one-shot per distinct state). Field shhxlog showed the scan bailing
- * to UNKNOWN for the WHOLE session with no visible reason; these values
- * close that gap. out[0] = bail code (0 scan completed, 1 no guest memory,
- * 2 player class slot not a heap pointer, 3 object count out of range,
- * 4 array data not a heap pointer, 5 array range overflows the heap),
- * out[1] = the class slot value read, out[2] = object count read,
- * out[3] = the array data pointer read. */
+ * them one-shot per distinct state). out[0] = final code:
+ *   0 scan completed, both classes from the module slots (cached or read);
+ *   1 no guest memory;
+ *   2 no longer terminal: a bad slot now falls back to name discovery —
+ *     the slot value read is reported as out[1] of code 6/7 instead;
+ *   3 object count out of range, 4 array data not a heap pointer,
+ *     5 array range overflows the heap window;
+ *   6 the name fallback RAN and the player class is known (out[1] = the
+ *     ASwatPlayer slot value read — field hhklog: 0x010a5320, a foreign
+ *     image pointer, for the whole session);
+ *   7 the name fallback could not find a UClass "SwatPlayer" (same fields
+ *     as 6) — degraded to UNKNOWN, never guessed.
+ * out[2] = object count read, out[3] = the array data pointer read. */
 void hud_scan_diag(uint32_t out[4]);
 
 /* Doors (stage 3): refreshed on each scan (1 s), positions are static. */

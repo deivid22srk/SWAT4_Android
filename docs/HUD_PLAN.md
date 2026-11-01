@@ -33,6 +33,15 @@ Consequência direta: **achar objetos reais por classe é um loop O(N) sobre
 `GObjObjects` comparando `obj->Class == *(UClass**)PRIVATE_STATIC_CLASS`** —
 sem heurística, sem nome, sem suposição de layout.
 
+*Atualização de campo (hhklog, 2026-11-01): o slot de
+`ASwatPlayer::PrivateStaticClass` (endereço e RVA conferidos no PE — export
+real, seção .data, SHA do DLL igual ao da cópia GOG) leu **0x010a5320** —
+um ponteiro da imagem da Core.dll — durante uma sessão inteira no aparelho,
+abortando todo scan. O slot agora é só caminho rápido validável; o que não
+vier dele é **descoberto por nome** no próprio `GObjObjects` (UClass
+"SwatPlayer"/"SwatDoor" via auto-cadeia da metaclasse + tabela de Names) —
+o array do engine é a fonte da verdade, não um dword de .data.*
+
 ### Binds reais do jogo (DefUser.ini, cópia GOG)
 
 | Tecla | Comando real | Uso no HUD |

@@ -1755,3 +1755,65 @@ defesa para qualquer outro escritor divergente.
   corrigido 0/16, alinhamento ok (rc=0).
 * `gcc -fsyntax-only -Iruntime runtime/{swat4_shims,heap,kernel32,msvcrt,misc,shims,dispatch,modules}.c`: rc=0.
 * `sh tools/test_heap.sh`: ALL PASS; `sh scripts/test_hud.sh`: rc=0.
+
+## 2026-11-01 (3) — WA0233: câmera volta a "um local fixo" a cada novo arrasto + o analógico não anda o personagem
+
+### Sintomas (vídeo VID-20261101-WA0233.mp4, APK 409ebfa)
+
+* Arrastar o dedo move a câmera, mas ao SOLTAR e arrastar de novo a câmera
+  pula como se a ponteira do mouse voltasse a um lugar fixo a cada gesto.
+* Mover o analógico (stick) não anda o personagem.
+
+### Uma causa só (log hhkport.zip, linhas `hud:` da mesma sessão do vídeo)
+
+* `hud scan: bail 2 cls 010a5320 num 0 data 00000000` — o slot
+  `ASwatPlayer::PrivateStaticClass` (SwatGame+0xab848) leu **0x010a5320**,
+  um ponteiro da imagem da Core.dll, e o scan antigo ABORTAVA aí (bail 2)
+  antes de andar no array. `ctx` ficou **0 (UNKNOWN) a sessão inteira**
+  (todas as linhas periódicas: `ctx 0`; `ctx -1 -> 0`, gen 8, pawn 0).
+* Com ctx != MISSION o HudOverlay: (1) dedo livre vira mouse de menu →
+  `menu_steer()` empurra `alvo - modelo` no canal de look a CADA novo
+  toque — o "pulo para um local fixo" (o modelo do cursor fica onde o
+  gesto anterior terminou e o dedo volta ao mesmo lugar de repouso);
+  46 steers na sessão. (2) o stick manda SETAS (navegação de menu) em vez
+  de WASD.
+* DefUser.ini (cópia GOG): `W/A/S/D=MoveForward/Backward/StrafeLeft/Right`;
+  `Up/Down/Left/Right` = vazio ou `ScrollChatUp/Down` — seta NÃO anda.
+* O RVA 0xab848 está CERTO (export `?PrivateStaticClass@ASwatPlayer@@`,
+  seção .data, SHA 27fc10be… conferido no PE; o log confirma
+  `loaded SwatGame.dll at 03200000`). O slot é BSS (o .data bruto do PE só
+  tem 0x1000 bytes; 0xab848 está na cauda virtual) e alguém escreveu um
+  ponteiro estranho lá — origem ainda desconhecida (o gen referencia
+  0x32AB848 só por ponteiro; nenhuma escrita direta). Um slot de .data não
+  é a verdade do engine: o array de objetos é.
+
+### Correção (runtime/hud_state.cpp)
+
+* O scan agora resolve o array PRIMEIRO (códigos 3/4/5) e trata as classes
+  como cache validável: slot de módulo quando contiver um UClass real
+  (validação por auto-cadeia da metaclasse: `Class->Class == Class`), e
+  **descoberta por nome** (UClass "SwatPlayer"/"SwatDoor" no próprio array,
+  via tabela de Names com ANSI/UTF-16 e os dois layouts de `Names` — o
+  ponteiro indireto do engine e o direto já pinado) quando o slot falhar.
+  Classes descobertas ficam cacheadas (o fallback roda uma vez por
+  processo); falha = UNKNOWN com diag 7, nunca palpite.
+* `in_entry_package` também aceita os dois layouts de Names (no engine real
+  `Names` é `FNameEntry**`).
+* Diagnóstico novo: código 6 = fallback rodou e achou (out[1] = o valor
+  estranho do slot, evidência permanente no log); 7 = fallback não achou.
+  O código 2 deixou de ser terminal.
+
+### Validação
+
+* Selftest novo (S6/S6b/S7): slot com 0x010a5320 + array vivo → descoberta
+  → MISSION, diag 6 com o valor do slot; cache segura o scan seguinte
+  (diag 0); cadeia da classe quebrada → UNKNOWN, diag 7. Classes do teste
+  agora na forma real do engine (META aponta para si, classes apontam para
+  META) — uma instância de pawn nunca passa no filtro de classe.
+* `sh scripts/test_hud.sh`: rc=0 (compilação C/C++ inteira + ring selftest
+  + hud_state selftest + behav vinput/dinput: all ok).
+* O próximo log do aparelho deve mostrar `hud scan: bail 6 cls 010a5320 …`
+  uma vez e depois `hud: ctx 0 -> 2 (gen N pawn …)` ao entrar na missão —
+  com ctx 2 o dedo livre é look relativo puro (sem steer) e o stick manda
+  WASD (pol state DI). Se ainda vier `bail 7`, o diag traz num/data do
+  array para a próxima etapa.

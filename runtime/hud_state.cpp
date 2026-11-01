@@ -113,13 +113,50 @@ uint32_t hud_pawn(void) { return s_pawn; }
 
 const uint32_t *hud_pawn_loc(void) { return s_pawn ? s_pawn_loc : NULL; }
 
-/* Full rescan: walk the engine object array once, collecting the player
- * pawn and every ASwatDoor (both by exact class match). Anything unexpected
+/* Full rescan: walks the engine object array (classes resolved above it:
+ * module slots first, then the name fallback — see scan). Anything unexpected
  * (core not initialized, heap pointer out of range) degrades to
- * HUD_CTX_UNKNOWN, never to a wrong positive. UClass objects are themselves
- * heap UObjects, so the PrivateStaticClass VALUE is heap-checked. */
+ * HUD_CTX_UNKNOWN, never to a wrong positive. */
 static void read_loc(uint32_t obj, uint32_t out[3]) {
     memcpy(out, s_mem + obj + ACTOR_LOC_OFF, 12);
+}
+
+/* 1 when `c` is a UClass object: its Class (+0x24) is the UClass metaclass,
+ * an object whose own Class is itself (UClass::Class == UClass — the
+ * engine's root). On real data only class objects pass: a pawn instance
+ * named "SwatPlayer" has Class == ASwatPlayer::StaticClass, whose Class is
+ * the metaclass — a DIFFERENT object — so instances never pass.
+ * The synthetic selftest mirrors this with a META object (Class -> META,
+ * META -> META). */
+static int is_uclass(uint32_t c) {
+    if (!in_heap(c)) return 0;
+    uint32_t cc = r32(c + UOBJ_CLASS_OFF);
+    return in_heap(cc) && r32(cc + UOBJ_CLASS_OFF) == cc;
+}
+
+/* UObject name comparison through the FName table. `Names` (Core.dll RVA
+ * 0x28c2c0) is `FNameEntry**` in the engine — the variable holds the array
+ * pointer — while the Entry-package check below indexes the variable
+ * directly (layout the boot log pinned). Both layouts are tried with the
+ * full NUL-terminated match ("SwatPlayer" + NUL, ANSI or UTF-16), which
+ * makes a wrong-layout hit implausible. */
+static int fname_is(uint32_t obj, const char *name) {
+    uint32_t idx = r32(obj + UOBJ_NAME_OFF);
+    if (idx >= NAMES_MAX) return 0;
+    size_t len = strlen(name);
+    for (int layout = 0; layout < 2; layout++) {
+        uint32_t arr = layout == 0 ? r32(NAMES_BASE) : NAMES_BASE;
+        if (layout == 0 && !in_heap(arr)) continue; /* direct: array lives in module .data */
+        uint32_t entry = r32(arr + idx * 4);
+        if (!in_heap(entry)) continue;
+        for (int wide = 0; wide < 2; wide++) {
+            int ok = 1;
+            for (size_t i = 0; i <= len && ok; i++)
+                ok = s_mem[entry + 0xC + i * (wide + 1)] == (uint8_t)name[i];
+            if (ok) return 1;
+        }
+    }
+    return 0;
 }
 
 /* 1 when `obj`'s map package is named "Entry": the boot level behind the
@@ -135,29 +172,41 @@ static int in_entry_package(uint32_t obj) {
     if (!in_heap(pkg)) return 0;
     uint32_t fname = r32(pkg + UOBJ_NAME_OFF);
     if (fname >= NAMES_MAX) return 0;
-    uint32_t entry = r32(NAMES_BASE + fname * 4);
-    if (!in_heap(entry)) return 0;
     static const char name[6] = "Entry";
-    for (int wide = 0; wide < 2; wide++) {
-        int ok = 1;
-        for (int i = 0; i < 6 && ok; i++) {
-            uint8_t c = s_mem[entry + 0xC + i * (wide + 1)];
-            ok = c == (uint8_t)name[i];
+    for (int layout = 0; layout < 2; layout++) {
+        uint32_t arr = layout == 0 ? r32(NAMES_BASE) : NAMES_BASE;
+        if (layout == 0 && !in_heap(arr)) continue;
+        uint32_t entry = r32(arr + fname * 4);
+        if (!in_heap(entry)) continue;
+        for (int wide = 0; wide < 2; wide++) {
+            int ok = 1;
+            for (int i = 0; i < 6 && ok; i++) {
+                uint8_t c = s_mem[entry + 0xC + i * (wide + 1)];
+                ok = c == (uint8_t)name[i];
+            }
+            if (ok) return 1;
         }
-        if (ok) return 1;
     }
     return 0;
 }
 
+/* Full rescan: the object array is the source of truth. The UClass handles
+ * come from the module .data slots when those hold real UClasses (fast
+ * path); anything they fail to provide is DISCOVERED BY NAME over the same
+ * array (the engine's own data, no extra constants to trust). Anything
+ * unexpected degrades to HUD_CTX_UNKNOWN / HUD_CTX_MENU, never to a wrong
+ * positive. Field hhklog: the ASwatPlayer slot (SwatGame+0xab848, RVA and
+ * SHA-verified export) held 0x010a5320 — a Core.dll image pointer — for the
+ * WHOLE session; bail 2 aborted every scan before the array walk, ctx never
+ * left UNKNOWN, and the HUD degraded exactly as reported (menu-mouse drags
+ * snapping the camera in missions, stick arrows instead of WASD: the
+ * character never walked). One .data slot is not the engine's truth. */
 static void scan(void) {
     s_pawn = 0;
     s_ndoors = 0;
     s_entry_pawn = 0;
     s_gen++;
     if (!s_mem) { diag(1, 0, 0, 0); s_ctx = HUD_CTX_UNKNOWN; return; }
-    uint32_t cls = r32(SWATGAME_BASE + RVA_CLS_SWATPLAYER); /* module .data slot */
-    uint32_t cls_door = r32(SWATGAME_BASE + RVA_CLS_SWATDOOR);
-    if (!in_heap(cls)) { diag(2, cls, 0, 0); s_ctx = HUD_CTX_UNKNOWN; return; } /* not registered yet */
     uint32_t arr = CORE_BASE + RVA_GOBJOBJECTS;
     uint32_t data = r32(arr), num = r32(arr + 4);
     if (!num || num > GOBJ_NUM_CAP || !in_heap(data) ||
@@ -167,18 +216,39 @@ static void scan(void) {
          * first draft collapsed wrap/range into 4 and would have sent the
          * next debugger to the wrong check) */
         diag(!num || num > GOBJ_NUM_CAP ? 3 : !in_heap(data) ? 4 : 5,
-             cls, num, data);
+             0, num, data);
         s_ctx = HUD_CTX_UNKNOWN;
         return;
     }
-    diag(0, cls, num, data);
-    s_cls = cls;
-    s_cls_door = in_heap(cls_door) ? cls_door : 0;
+    /* Classes: cached handles are revalidated (a UClass lives forever, but
+     * never trust blindly), then the module slots, then the name fallback
+     * (codes 6/7 — see hud_state.h). Cached classes make the fallback run
+     * once per process, not once per scan. */
+    uint32_t slot = r32(SWATGAME_BASE + RVA_CLS_SWATPLAYER);
+    uint32_t slot_door = r32(SWATGAME_BASE + RVA_CLS_SWATDOOR);
+    if (!is_uclass(s_cls)) s_cls = 0;
+    if (!s_cls && is_uclass(slot)) s_cls = slot;
+    if (!is_uclass(s_cls_door)) s_cls_door = 0;
+    if (!s_cls_door && is_uclass(slot_door)) s_cls_door = slot_door;
+    int discovered = 0;
+    if (!s_cls || !s_cls_door) {
+        discovered = 1;
+        for (uint32_t i = 0; i < num && (!s_cls || !s_cls_door); i++) {
+            uint32_t o = r32(data + i * 4);
+            if (!in_heap(o)) continue;
+            uint32_t c = r32(o + UOBJ_CLASS_OFF);
+            if (!is_uclass(c)) continue;
+            if (!s_cls && fname_is(c, "SwatPlayer")) s_cls = c;
+            else if (!s_cls_door && fname_is(c, "SwatDoor")) s_cls_door = c;
+        }
+    }
+    if (!s_cls) { diag(7, slot, num, data); s_ctx = HUD_CTX_UNKNOWN; return; }
+    diag(discovered ? 6 : 0, slot, num, data);
     for (uint32_t i = 0; i < num; i++) {
         uint32_t o = r32(data + i * 4);
         if (!in_heap(o)) continue;
         uint32_t oc = r32(o + UOBJ_CLASS_OFF);
-        if (oc == cls && !s_pawn) {
+        if (oc == s_cls && !s_pawn) {
             s_pawn = o;
             read_loc(o, s_pawn_loc);
         } else if (s_cls_door && oc == s_cls_door && s_ndoors < HUD_MAXDOORS &&
@@ -295,6 +365,7 @@ int main(void) {
     const uint32_t CLS  = 0x03200000u + 0xab848u;    /* ASwatPlayer::StaticClass slot */
     const uint32_t CLSD = 0x03200000u + 0xa6408u;    /* ASwatDoor::StaticClass slot   */
     const uint32_t NAMES = 0x01000000u + 0x28c2c0u;
+    const uint32_t META = 0x2AAA0000;                /* UClass of UClass */
     const uint32_t CLSOBJ = 0x2AAA1000, CLSDOBJ = 0x2AAA2000;
     const uint32_t PAWN = 0x2BBB2000, DOOR1 = 0x2BBB3000, DOOR2 = 0x2BBB4000;
     const uint32_t DATA = 0x2CCC3000, LVL = 0x2DDD4000, PKG = 0x2DDD5000;
@@ -306,12 +377,14 @@ int main(void) {
     hud_game_tick(0);
     CHECK(hud_game_ctx() == HUD_CTX_UNKNOWN);
 
-    /* engine reality: UClass objects are heap objects; the array holds a
-     * pawn and two doors */
+    /* engine reality: UClass objects are heap objects whose Class is the
+     * UClass metaclass, which points to itself — the shape that keeps pawn
+     * INSTANCES out of the name-fallback's class filter */
     w32(CLS, CLSOBJ);
     w32(CLSD, CLSDOBJ);
-    w32(CLSOBJ + 0x24, CLSOBJ);          /* a UClass points to itself */
-    w32(CLSDOBJ + 0x24, CLSDOBJ);
+    w32(META + 0x24, META);
+    w32(CLSOBJ + 0x24, META);
+    w32(CLSDOBJ + 0x24, META);
     w32(PAWN + 0x24, CLSOBJ);
     w32(DOOR1 + 0x24, CLSDOBJ);
     w32(DOOR2 + 0x24, CLSDOBJ);
@@ -369,6 +442,61 @@ int main(void) {
     w32(GOBJ, 0x7FFFFFFF);               /* not a heap pointer */
     hud_game_tick(8);
     CHECK(hud_game_ctx() == HUD_CTX_UNKNOWN);
+
+    /* S6 (field hhklog): the ASwatPlayer slot holds a foreign image pointer
+     * (0x010a5320) while the array is perfectly live — the name fallback
+     * discovers both classes and the pawn makes MISSION. Names here use
+     * the INDIRECT layout (FNameEntry**: the variable holds the array
+     * pointer), the engine's own shape. */
+    hud_state_reset_for_tests();
+    hud_set_guest_mem(m);
+    w32(GOBJ, DATA);
+    w32(GOBJ + 4, 3);
+    w32(CLS, 0x010a5320u);               /* what the phone actually read */
+    w32(CLSD, 0);
+    const uint32_t NAMES_ARR = 0x2EEE7000;
+    const uint32_t FP = 0x2EEE8000, FD = 0x2EEE9000, FPK = 0x2EEEA000;
+    w32(NAMES, NAMES_ARR);               /* `Names` holds the array pointer */
+    w32(NAMES_ARR + 10 * 4, FP);
+    memcpy(m + FP + 0xC, "SwatPlayer", 11);
+    w32(CLSOBJ + 0x20, 10);
+    w32(NAMES_ARR + 11 * 4, FD);
+    memcpy(m + FD + 0xC, "SwatDoor", 9);
+    w32(CLSDOBJ + 0x20, 11);
+    w32(NAMES_ARR + 12 * 4, FPK);
+    memcpy(m + FPK + 0xC, "SwatGame", 9);
+    w32(PKG + 0x20, 12);
+    hud_game_tick(1000);
+    CHECK(hud_game_ctx() == HUD_CTX_MISSION);
+    CHECK(hud_pawn() == PAWN);
+    CHECK(hud_door_count() == 2);
+    {
+        uint32_t dg[4];
+        hud_scan_diag(dg);
+        CHECK(dg[0] == 6);               /* discovery ran and succeeded */
+        CHECK(dg[1] == 0x010a5320u);     /* the foreign slot value is reported */
+    }
+
+    /* S6b: discovered classes are cached — the next scan (garbage slots
+     * still) completes through the cache, no fallback, diag 0 */
+    hud_game_tick(2500);
+    CHECK(hud_game_ctx() == HUD_CTX_MISSION);
+    {
+        uint32_t dg[4];
+        hud_scan_diag(dg);
+        CHECK(dg[0] == 0);
+    }
+
+    /* S7: discovery fails (class chain broken) -> UNKNOWN with the field
+     * evidence, never a guessed MISSION */
+    w32(CLSOBJ + 0x24, 0);
+    hud_game_tick(4000);
+    CHECK(hud_game_ctx() == HUD_CTX_UNKNOWN);
+    {
+        uint32_t dg[4];
+        hud_scan_diag(dg);
+        CHECK(dg[0] == 7);
+    }
 
     munmap(img, 0x40000000u);
     printf(failures ? "hud_state selftest: %d FAILURES\n" : "hud_state selftest: ok\n",
