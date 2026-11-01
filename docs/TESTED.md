@@ -1580,3 +1580,77 @@ em um Pc" + "sinto falta daqueles botões cima baixo esquerda e direita no hud".
   `<pasta do jogo>/hudicons/<nome>.png` (nomes em `docs/MANIFEST_ICONES_HUD.md`).
 * Esta build também carrega a correção da Carreira (heap com folga de cauda)
   e os diagnósticos do "meio branco" — o próximo log fecha essa causa.
+
+## 2026-11-01 — shhxpott: a Carreira ainda fecha (ou fica carregando infinito) — o escritor Fantasma vai ser nomeado
+
+### Análise do log (112 MB, 3,0 M linhas) + vídeo
+
+* Build testada: a dos ícones (a faixa de horário do aparelho, UTC-3, bate:
+  log 13:05 = 16:05 UTC, zip subido 16:12). O crash é o MESMO do njdjport:
+  `LoadMap: SP-FoodWall` (Browse, linha 3028101) → mundo físico do Havok →
+  morte no dispatch do importador (`f_173B590+0x13c`, SIGSEGV code 2 = ACCERR
+  em MEM+0x14 — leitura através de vtbl lixo do objeto 0x21369260).
+* **Novo retrato da corrupção** (o heap endurecido flagrou 2 vezes e seguiu):
+  - CORRUPTION #1: os LINKS de um bloco LIVRE de 2,2 MB (0x210a4488,
+    size 0x236420) viraram lixo; a quarentena isolou [212da8a8..21366de8) —
+    575 KB — e o dump mostra dados de alta entropia (conteúdo .hke) por cima
+    de headers vivos.
+  - CORRUPTION #2: header em 0x210af508 virou o padrão repetido `01ff0901`;
+    segunda quarentena. O ring mostra que o bloco 8328 (payload 210a4490 —
+    os FVectors do parse, iguais ao njdjport) foi alocado DENTRO do envelope
+    que o escritor continua preenchendo.
+  - O escritor joga ~2,9 MB de dados sequenciais ATRAVESSANDO headers de
+    blocos (212da8a8 ERA um header) — não é overrun pequeno (a folga de cauda
+    não pega; nenhuma linha `heap: OVERRUN` no log inteiro), não é LockRect
+    (as 8 violações de canário d3d9 são todas de UMA textura tex-rect de
+    2,4 MB em região VA, inofensivas ao heap) e não é fread/ReadFile (shims
+    copiam exatamente n bytes; 32 freads de 256 B no log).
+* Conclusão: contenção NÃO resolve esta classe (os vizinhos vivos morrem do
+  mesmo jeito) e o log atual não nomeia o escritor. Também corrigidos de
+  passagem dois desvios reais encontrados na auditoria do caminho.
+
+### Correções
+
+* **Writer trap (runtime/heap.c)** — depois da PRIMEIRA corrupção o heap
+  entra em modo paranoico: a quarentena `[poison_min, poison_max)` e toda a
+  fronteira de bump `[g_top, 0x40000000)` viram `PROT_READ` (mprotect). O
+  próximo write falso do convidado é um SIGSEGV ACCERR cujo dump (já
+  existente) imprime RIP + registradores + backtrace — **o próximo log nomeia
+  o culpado de verdade**. Páginas entregues pelo bump voltam a ser RW
+  (um mprotect por alocação, só no modo paranoico — o boot nunca paga nada:
+  ele não corrompe). Frees de bloco do topo devolvem a faixa para RO.
+* **Header invalidado no tail-return (runtime/heap.c)** — o free do bloco do
+  topo zerava g_top sem invalidar o header: um free atrasado do MESMO ponteiro
+  (janela pré-bump) passava no `block_sane` e relinkava o que viesse depois.
+  Agora o header é zerado e o free atrasado é reportado (`bad free pointer`).
+  (Depois que o bump reusa o MESMO header, free atrasado e free legítimo são
+  indistinguíveis por endereço — o heap do Windows tem o mesmo buraco; quem
+  pega isso é o writer trap.)
+* **GMalloc guard: Realloc de ponteiro estranho COPIA o conteúdo**
+  (runtime/swat4_shims.c) — o atalho "os chamadores sobrescrevem tudo" vale
+  para FString, mas um buffer de stream que continua anexando no offset antigo
+  (o leitor .hke) perdia tudo o que já tinha lido a cada Realloc estranho.
+  Agora copia min(n, gsize(p)) para ponteiros do heap do runtime e min(n, 64 KB)
+  para os demais (imagens/stacks/VA: tudo mapeado).
+
+### Validação
+
+* `bash tools/test_heap.sh`: **ALL PASS**, com 2 cenários novos —
+  `test_stale_free_tail_return` (free atrasado na janela pré-bump é
+  reportado; a faixa devolvida é entregue de novo RW) e `test_paranoid_trap`
+  (fork: write em página em quarentena morre com SIGSEGV; alocação pós-rebuild
+  continua funcionando e gravável).
+* `gcc -fsyntax-only` em runtime/*.c com -I/tmp/sdlinc: rc=0.
+* `bash scripts/test_hud.sh`: rc=0 (intacto).
+
+### O que esperar no aparelho
+
+* Se a corrupção acontecer de novo (provável), o jogo MORRE MAIS CEDO — na
+  primeira escrita fantasma — e o log traz `CRASH: signal 11 code 2 at
+  address …` com o RIP dentro de libmain.so (`f_XXXXXXX+N`) apontando o
+  escritor. Esse é o objetivo desta rodada: trocar a morte confusa do dispatch
+  pela IDENTIDADE do culpado; a rodada seguinte corrige o caminho nomeado.
+* Se o Realloc-estrangeiro do leitor .hke era o gatilho, a cópia nova pode já
+  mudar o comportamento (o parse passa a ter os dados que o jogo espera).
+* O "carregando infinito" e o "fecha" são o mesmo escritor: com o trap, os
+  dois casos terminam no mesmo dump nomeado.

@@ -1490,6 +1490,18 @@ SHIM(gmalloc_realloc_wrap) {
         if (size == 0) RET(0, 3);
         uint32_t args[3] = {0, size, tag}; /* ptr=0 -> original Malloc path */
         uint32_t r = rt_invoke(c, g_gm_orig_realloc, 3, args);
+        /* Realloc semantics: the old content must survive the move. The
+         * no-copy shortcut was only safe for overwrite-all callers; a
+         * stream buffer that keeps appending at the old fill offset (the
+         * .hke reader) silently lost everything it had parsed. Copy what
+         * is knowable: the real size for runtime-heap pointers, a bounded
+         * window for the rest (module images / stacks / VA: all mapped). */
+        if (r && ptr) {
+            uint32_t oldn = 0;
+            if (ptr >= 0x20000000u && ptr < 0x40000000u) oldn = gsize(ptr);
+            if (oldn == 0 || oldn > size) oldn = size < 0x10000u ? size : 0x10000u;
+            if (oldn) memcpy(MEM + r, MEM + ptr, oldn);
+        }
         RET(r, 3);
     }
     uint32_t args[3] = {ptr, size, tag};

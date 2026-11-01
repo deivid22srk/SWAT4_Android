@@ -22,6 +22,8 @@
 #include <stdint.h>
 #include <pthread.h>
 #include <sys/mman.h>
+#include <sys/wait.h>
+#include <unistd.h>
 
 /* ---- stub do rt.h: exatamente o que heap.c usa ---- */
 static uint8_t *MEM;
@@ -192,6 +194,52 @@ static void test_wrap_quarantine(void) {
     gfree(a); gfree(c); /* em quarentena: descartados com log, sem crash */
 }
 
+/* shhxpott: um free de um ponteiro cujo bloco já voltou para a fronteira do
+ * bump não pode aplicar o free de novo. Na janela pré-bump o header
+ * invalidado força o descarte com relatório (bad free pointer); depois que o
+ * bump reusa o MESMO header, free atrasado e free legítimo são
+ * indistinguíveis por endereço (o heap do Windows tem o mesmo buraco — por
+ * isso o jogo não faz double-free) — essa parte fica a cargo do writer trap. */
+static void test_stale_free_tail_return(void) {
+    uint32_t baseline = g_corrupt_events;
+    uint32_t big = gmalloc(0x10000); /* maior que qualquer bin: vem do bump */
+    CHECK(big != 0, "big alloc %08x", big);
+    memset(MEM + big, 0x11, 0x10000);
+    gfree(big);                      /* tail-return: volta para a fronteira */
+    gfree(big);                      /* free ATRASADO: header já invalidado */
+    CHECK(g_corrupt_events > baseline,
+          "stale free reported (events %u -> %u)", baseline, g_corrupt_events);
+    uint32_t q = gmalloc(0x20000);   /* bump reusa a faixa devolvida */
+    CHECK(q != 0, "bump reuses the returned span (q=%08x)", q);
+    memset(MEM + q, 0x77, 0x20000);  /* páginas entregues voltam a ser RO->RW */
+    CHECK(M8(q + 0x1234) == 0x77, "returned span handed out read-write");
+    gfree(q);
+}
+
+/* shhxpott writer trap: depois da primeira corrupção a memória morta fica
+ * read-only — o próximo write falso morre com o RIP do escritor em vez de
+ * destruir vizinhos vivos em silêncio. Alocações continuam funcionando (as
+ * páginas entregues voltam a ser graváveis). */
+static void test_paranoid_trap(void) {
+    uint32_t a = gmalloc(0x100), b = gmalloc(0x100), c = gmalloc(0x100);
+    M32(b + 4) = 0xFFFFFFF1u; /* BSIZE enrolado -> rebuild no próximo gmalloc */
+    M32(a + 8) = 0x21;        /* NEXTF insano */
+    uint32_t p = gmalloc(0x1000);
+    CHECK(p != 0, "paranoid: bump alloc after rebuild (p=%08x)", p);
+    memset(MEM + p, 0x55, 0x1000); /* páginas entregues voltam a ser graváveis */
+    CHECK(M8(p + 0xFFF) == 0x55, "paranoid: handout is writable again");
+    gfree(p);
+    CHECK(g_poison_min != 0xFFFFFFFFu, "paranoid: quarantine at %08x", g_poison_min);
+    uint32_t pg = (g_poison_min + 0xFFFu) & ~0xFFFu; /* página protegida */
+    pid_t pid = fork();
+    if (pid == 0) { M8(pg + 0x10) = 0x42; _exit(0); } /* write morto -> SIGSEGV */
+    int st = 0;
+    waitpid(pid, &st, 0);
+    CHECK(WIFSIGNALED(st) && WTERMSIG(st) == SIGSEGV,
+          "paranoid: write into quarantined page faults (status=%d)", st);
+    gfree(a); gfree(c); /* em quarentena: descartados, sem crash */
+}
+
 static void test_gbigalloc(void) {
     int va = 0;
     uint32_t p = gbigalloc(1u << 20, &va); /* 1 MiB -> regiao VirtualAlloc */
@@ -252,6 +300,8 @@ int main(void) {
     test_bad_frees();
     test_header_corruption_on_free();
     test_chain_quarantine();
+    test_stale_free_tail_return();
+    test_paranoid_trap();
     test_stress_mt();
     printf("== %s (%d failures, %u corruption events logged) ==\n",
            failures ? "FAILED" : "ALL PASS", failures, g_corrupt_events);

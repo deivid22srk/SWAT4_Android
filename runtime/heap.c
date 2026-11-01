@@ -32,6 +32,7 @@
 #include "rt.h"
 #include <string.h>
 #include <sys/mman.h>
+#include <errno.h>
 
 #define HDR 8u
 #define MINBLK 32u
@@ -143,6 +144,35 @@ static void heap_corrupt(const char *what, uint32_t a, uint32_t b, uint32_t c) {
     if (hit < 8) ring_dump(a);
 }
 
+/* ---- writer trap (shhxpott) ----
+ * The career load still dies to a writer that streams megabytes ACROSS heap
+ * block boundaries (shhxpott: ~2.9 MB of high-entropy data over free-list
+ * links, live headers and fresh objects; the 8328-byte FVector parse blocks
+ * were INSIDE the streamed envelope, so containment cannot save the live
+ * neighbours and the log cannot name the writer). After the FIRST corruption
+ * the heap therefore enters paranoid mode: every page that is not a live
+ * allocation becomes read-only, so the next bogus guest write is a
+ * SIGSEGV (SEGV_ACCERR) whose crash dump carries the writer's RIP + guest
+ * registers — the definitive clue. Two spans are protected:
+ *   - the quarantine [poison_min, poison_max): dead after a rebuild;
+ *   - the bump frontier [g_top, GUEST_HEAP_END): handed out page-by-page
+ *     (one mprotect per bump while paranoid). Boot never pays for this:
+ *     paranoia only starts after a corruption, which boot never hits. */
+static int g_paranoid;
+
+static void heap_protect(uint32_t lo, uint32_t hi, int rw) {
+    uint32_t a = (lo + 0xFFFu) & ~0xFFFu, b = hi & ~0xFFFu;
+    if (a >= b) return;
+    if (mprotect(MEM + a, b - a, rw ? PROT_READ | PROT_WRITE : PROT_READ))
+        LOG("heap: mprotect(%08x..%08x, %s) failed errno=%d", a, b, rw ? "rw" : "ro", errno);
+}
+
+/* Bump allocations write the header + payload in [lo, hi): make those pages
+ * writable again (frontier pages are read-only while paranoid). */
+static void paranoid_unprotect(uint32_t lo, uint32_t hi) {
+    if (g_paranoid) heap_protect(lo & ~0xFFFu, (hi + 0xFFFu) & ~0xFFFu, 1);
+}
+
 static int block_sane(uint32_t b) {
     if (b < GUEST_HEAP_BASE + 8 || b >= g_top) return 0;
     if ((b & 15) != 8) return 0;
@@ -188,6 +218,15 @@ static void heap_rebuild(void) {
     }
     LOG("heap: free lists rebuilt from boundary tags, %d free blocks relinked "
         "(quarantine %08x..%08x, top now %08x)", freed, g_poison_min, g_poison_max, g_top);
+    /* shhxpott writer trap: dead memory goes read-only. Reads by legit code
+     * of live objects inside the quarantine still work; the next WRITE is
+     * the SIGSEGV that names the culprit. */
+    g_paranoid = 1;
+    heap_protect(g_poison_min, g_poison_max, 0);
+    heap_protect(g_top, GUEST_HEAP_END, 0);
+    LOG("heap: PARANOID MODE on: quarantine and bump frontier [%08x..%08x) are "
+        "read-only — the next bogus write faults with the writer's RIP",
+        g_top, GUEST_HEAP_END);
 }
 
 /* Blocks inside the closed quarantine range stay alive for the game but are
@@ -268,6 +307,7 @@ restart:
         return 0;
     }
     uint32_t b = g_top;
+    paranoid_unprotect(b, b + need); /* frontier pages are RO while paranoid */
     M32(b) = g_last_block ? BSIZE(g_last_block) : 0;
     g_top += need;
     set_block(b, need, 1);
@@ -349,6 +389,15 @@ void gfree(uint32_t p) {
         g_last_block = 0;
         if (b > GUEST_HEAP_BASE + 8 && BPREV(b)) g_last_block = b - BPREV(b);
         if (g_last_block && QUARANTINED(g_last_block)) g_last_block = 0;
+        /* invalidate the header: a free of this pointer BEFORE the bump
+         * reuses the header must be REPORTED (bad free pointer), not walk
+         * whatever comes next. Once the bump re-hands the same header out,
+         * a stale free and the new occupant's own free are indistinguishable
+         * by address (Windows' heap has the same hole — the game simply
+         * never double-frees); writes into the recycled span are the
+         * paranoid writer trap's job. */
+        M32(b + 4) = 0;
+        if (g_paranoid) heap_protect(b, GUEST_HEAP_END, 0); /* dead again: trap */
         pthread_mutex_unlock(&g_heap_lock);
         return;
     }
