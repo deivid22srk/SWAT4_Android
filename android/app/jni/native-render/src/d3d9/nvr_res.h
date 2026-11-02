@@ -18,6 +18,7 @@ struct ResRefs {
 // ------------------------------------------------------------- NrSurface
 class NrSurface final : public IDirect3DSurface9, public ResRefs {
 public:
+    NrDevice *dev() { return (NrDevice *)owner; }
     SurfCore core;
     std::function<void()> destroy_cb;
     ULONG STDMETHODCALLTYPE AddRef() override { return ++refs; }

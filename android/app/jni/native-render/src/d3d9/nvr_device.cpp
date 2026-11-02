@@ -801,6 +801,48 @@ HRESULT NrDevice::DrawRectPatch(UINT, const float *, const D3DRECTPATCH_INFO *) 
 HRESULT NrDevice::DrawTriPatch(UINT, const float *, const D3DTRIPATCH_INFO *) { return D3DERR_INVALIDCALL; }
 HRESULT NrDevice::DeletePatch(UINT) { return D3D_OK; }
 
+HRESULT NrDevice::QueryInterface(REFIID riid, void **out) {
+    if (!out) return E_POINTER;
+    *out = nullptr;
+    if (riid == __uuidof(IDirect3DDevice9) || riid == __uuidof(IUnknown)) {
+        *out = (IDirect3DDevice9 *)this;
+        AddRef();
+        return S_OK;
+    }
+    return E_NOINTERFACE;
+}
+
+ULONG NrDevice::Release() {
+    ULONG r = --refs;
+    if (!r) {
+        shutdown();
+        delete this;
+    }
+    return r;
+}
+
+HRESULT NrDevice::GetDirect3D(IDirect3D9 **out) {
+    if (!out) return D3DERR_INVALIDCALL;
+    *out = m_d3d;
+    if (*out) (*out)->AddRef();
+    return D3D_OK;
+}
+
+HRESULT NrDevice::GetDeviceCaps(D3DCAPS9 *out) {
+    if (!out) return D3DERR_INVALIDCALL;
+    fill_device_caps(out, *m_vk);
+    return D3D_OK;
+}
+
+HRESULT NrDevice::GetBackBuffer(UINT swap, UINT i, D3DBACKBUFFER_TYPE, IDirect3DSurface9 **out) {
+    // uma swapchain implicita com um unico backbuffer (modelo da bridge)
+    if (swap != 0 || i != 0 || !out) return D3DERR_INVALIDCALL;
+    if (!m_backbuffer) return D3DERR_INVALIDCALL;
+    *out = m_backbuffer;
+    (*out)->AddRef();
+    return D3D_OK;
+}
+
 HRESULT NrDevice::SetCursorProperties(UINT, UINT, IDirect3DSurface9 *) { return D3D_OK; }
 void NrDevice::SetCursorPosition(int, int, DWORD) {}
 BOOL NrDevice::ShowCursor(BOOL show) {

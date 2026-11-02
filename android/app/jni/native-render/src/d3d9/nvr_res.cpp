@@ -504,6 +504,63 @@ HRESULT NrVolume::GetContainer(REFIID riid, void **out) {
     (void)riid; (void)out;
     return D3DERR_NOTFOUND;
 }
+// LockRect de superficie: nivel de textura (compartilha o sysmem do TexCore)
+// ou superficie standalone (sysmem proprio). Semantica D3D9: RT em DEFAULT
+// nao e lockavel; sistema/managed usam o shadow.
+HRESULT NrSurface::LockRect(D3DLOCKED_RECT *out, const RECT *rect, DWORD flags) {
+    if (!out) return D3DERR_INVALIDCALL;
+    if (core.tex) {
+        TexCore &t = *core.tex;
+        if (core.level >= t.levels) return D3DERR_INVALIDCALL;
+        if (t.usage & D3DUSAGE_RENDERTARGET && t.pool == D3DPOOL_DEFAULT)
+            return D3DERR_INVALIDCALL;
+        if (t.sysmem.empty()) return D3DERR_INVALIDCALL;   // sem shadow nao trava
+        uint8_t *base = t.sysmem.data() + t.level_offset[core.level] +
+                        (t.type == D3DRTYPE_CUBETEXTURE
+                             ? (size_t)core.layer * (t.level_size(core.level) / 6)
+                             : 0);
+        out->Pitch = (INT)t.level_pitch[core.level];
+        out->pBits = base;
+        if (rect) {
+            const FormatInfo &fi = format_info(t.fmt);
+            out->pBits = (uint8_t *)out->pBits + (size_t)rect->top * t.level_pitch[core.level] +
+                         (size_t)(rect->left / fi.block_width) * fi.bytes_per_block;
+        }
+        if (!(flags & D3DLOCK_READONLY)) {
+            t.dirty[core.level] = true;
+            t.whole_dirty = true;
+        }
+        return D3D_OK;
+    }
+    // standalone
+    if (core.usage & D3DUSAGE_RENDERTARGET && core.pool == D3DPOOL_DEFAULT)
+        return D3DERR_INVALIDCALL;   // RT nao e lockavel (D3D9)
+    if (core.is_depth) return D3DERR_INVALIDCALL;
+    const FormatInfo &fi = format_info(core.fmt);
+    uint32_t lw = std::max(1u, core.width()), lh = std::max(1u, core.height());
+    uint32_t row_bytes = ((lw + fi.block_width - 1) / fi.block_width) * fi.bytes_per_block;
+    uint8_t *data = sysmem_data_resize((size_t)row_bytes * lh);
+    if (!data) return D3DERR_OUTOFVIDEOMEMORY;
+    out->Pitch = (INT)row_bytes;
+    out->pBits = data;
+    if (rect)
+        out->pBits = data + (size_t)rect->top * row_bytes +
+                     (size_t)(rect->left / fi.block_width) * fi.bytes_per_block;
+    return D3D_OK;
+}
+
+HRESULT NrSurface::UnlockRect() {
+    if (core.tex) {
+        TexCore &t = *core.tex;
+        if (t.pool == D3DPOOL_DEFAULT && t.image && (t.dirty[core.level] || t.whole_dirty))
+            dev()->upload_texcore(t, false);
+        return D3D_OK;
+    }
+    // standalone: o sysmem e a fonte (UpdateSurface/locks de sistema); nada
+    // a empurrar aqui — uploads de imagens DEFAULT acontecem via UpdateSurface
+    return D3D_OK;
+}
+
 HRESULT NrSurface::GetDC(HDC *) { return D3DERR_INVALIDCALL; }
 HRESULT NrSurface::ReleaseDC(HDC) { return D3DERR_INVALIDCALL; }
 
