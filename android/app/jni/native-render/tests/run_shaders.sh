@@ -4,12 +4,13 @@
 #  2. roda: emite SPIR-V para cada caso
 #  3. valida cada .spv com spirv-val (se disponivel)
 # Uso: run_shaders.sh [dir-saidas]
-set -u
-# Raiz do repo derivada deste script (funciona no checkout do CI e no host)
+set -u -o pipefail
+# Caminhos derivados deste script (funciona no checkout do CI e no host):
+# native-render fica em android/app/jni/native-render; dxvk e sdlinc em
+# android/app/jni (um nivel acima do modulo).
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 NVR="$(cd "$SCRIPT_DIR/.." && pwd)"
-# repositorio = tres niveis acima de native-render (android/app/jni/native-render)
-ROOT="$(cd "$NVR/../../.." && pwd)"
+JNI="$(cd "$NVR/.." && pwd)"
 OUT=${1:-/tmp/nvr-spv}
 SPIRV_VAL="${SPIRV_VAL:-/tmp/spirv-tools/build/tools/spirv-val}"
 BINDIR=/tmp/nvr-test
@@ -18,13 +19,15 @@ mkdir -p "$BINDIR" "$OUT"
 echo "== build do gerador =="
 g++ -std=c++17 -g0 -O1 -Wall -Wextra -Wno-unused-parameter \
   -I"$NVR/src" -I"$NVR/src/shader" -I"$NVR/thirdparty/spirv_inc" \
-  -I"$ROOT/dxvk/include/native/directx" -I"$ROOT/dxvk/include/native/windows" \
-  -I"$ROOT/dxvk/include" \
+  -I"$JNI/dxvk/include/native/directx" -I"$JNI/dxvk/include/native/windows" \
+  -I"$JNI/dxvk/include" \
   "$NVR/tests/nvr_test_shaders.cpp" \
   "$NVR/src/shader/nvr_dx9bc.cpp" "$NVR/src/shader/nvr_compile.cpp" \
   "$NVR/src/shader/nvr_spirv.cpp" "$NVR/src/shader/nvr_fff.cpp" \
-  "$NVR/src/nvr_common.cpp" "$NVR/src/nvr_format.cpp" \
-  -o "$BINDIR/nvr_test_shaders" -l:libvulkan.so.1 -L/usr/lib/x86_64-linux-gnu 2>&1 | head -30 || exit 1
+  "$NVR/src/nvr_common.cpp" \
+  -o "$BINDIR/nvr_test_shaders" 2>&1 | head -30
+# sem o loader do host o binario nao linka; compile-only ja cobre a sintaxe
+[ -f "$BINDIR/nvr_test_shaders" ] || { echo "harness nao compilou (binario ausente)"; exit 1; }
 
 echo "== geracao =="
 rm -f "$OUT"/*.spv
