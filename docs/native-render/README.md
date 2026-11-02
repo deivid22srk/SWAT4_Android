@@ -120,19 +120,27 @@ android/app/jni/native-render/
 
 ## 5. O que foi VERIFICADO neste ambiente
 
-- **Compilação**: os 18 objetos do módulo (host x86-64, g++ `-Wall -Wextra`,
-  headers Vulkan/SDL2/d3d9 vendidos no repo) e o link de
-  `libnative_render.so` sem símbolos indefinidos. O `runtime/renderer_host.cpp`
-  compila isoladamente. A integração CMake é a mesma usada pelo CI.
-- **SPIR-V**: harness desktop (`tests/run_shaders.sh`) monta bytecode D3D9
-  real (10 casos de VS/PS cobrindo m4x4, DEF/DEFI/DEFB, loop/aL, break dentro
-  de if, rep, mova, setp/breakp, call/label, sincos, pow, texld/texldl/texldb/
-  texldd/proj/texkill, dp2add, dsx/dsy, cmp/lrp/cnd, srcmods, writemasks
-  parciais, alpha test) + 5 assinaturas fixed-function (luzes point/spot/
-  directional, fog linear/exp/exp2 vertex e table, TCI camera-space, projected,
-  texture matrix, MULTIPLYADD/LERP/DOTPRODUCT3, alpha test). **Todos os 20
-  módulos SPIR-V gerados passam em `spirv-val --target-env vulkan1.1`.**
-- O harness é determinístico e roda no CI (job `shader-tests`).
+- **CI verde na branch** (`build.yml`, commits a partir de
+  `feature/native-vulkan-renderer`):
+  - **job `shader-tests`**: monta bytecode D3D9 real (10 casos de VS/PS: m4x4,
+    DEF/DEFI/DEFB, loop/aL, break dentro de if, rep, mova, setp/breakp,
+    call/label, sincos, pow, texld/texldl/texldb/texldd/proj/texkill, dp2add,
+    dsx/dsy, cmp/lrp/cnd, srcmods, writemasks parciais, alpha test) + 5
+    assinaturas fixed-function (point/spot/directional, fog linear/exp/exp2
+    vertex e table, TCI camera-space, projected, texture matrix, MULTIPLYADD/
+    LERP/DOTPRODUCT3, alpha test) e valida **20/20 módulos SPIR-V** com
+    `spirv-val --target-env vulkan1.1`.
+  - **job `apk`**: build Android completa no NDK 27.2 (arm64-v8a) — o módulo
+    compila com clang, `libnative_render.so` linka com `--no-undefined`
+    (771+ símbolos exportados, nenhum indefinido) e o Gradle produz o APK
+    app-only com dxvk e native-render dentro do `libmain.so`.
+- Host: os 18 objetos compilam com g++ `-Wall -Wextra`; link estrito
+  (`-Wl,--no-undefined`) com SDL2 real 2.30.11 e loader Vulkan do sistema.
+  `runtime/renderer_host.cpp` compila isoladamente.
+- O histórico de correções que o CI/estrito expôs (caminhos relativos do
+  CMake, aritmetica em `void*`, narrowing de flags, 7 métodos declarados sem
+  definição, `ROOT` do harness) está nos commits da branch — cada um validado
+  no CI antes do seguinte.
 
 ## 6. O que NÃO foi verificado aqui (exigiria aparelho)
 
