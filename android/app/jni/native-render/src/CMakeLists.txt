@@ -7,37 +7,42 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
+# Caminhos relativos a ESTE CMakeLists (native-render/src/).
 set(NVR_SRC
-    src/nvr_common.cpp
-    src/nvr_format.cpp
-    src/vulkan/nvr_vk.cpp
-    src/vulkan/nvr_vma_impl.cpp
-    src/vulkan/nvr_gfx.cpp
-    src/vulkan/nvr_fb.cpp
-    src/shader/nvr_spirv.cpp
-    src/shader/nvr_dx9bc.cpp
-    src/shader/nvr_compile.cpp
-    src/shader/nvr_fff.cpp
-    src/d3d9/nvr_d3d9.cpp
-    src/d3d9/nvr_device.cpp
-    src/d3d9/nvr_device2.cpp
-    src/d3d9/nvr_res.cpp
-    src/d3d9/nvr_draw.cpp
-    src/d3d9/nvr_draw2.cpp
-    src/d3d9/nvr_pack.cpp
-    src/d3d9/nvr_present.cpp
-    src/d3d9/nvr_api.cpp
+    nvr_common.cpp
+    nvr_format.cpp
+    vulkan/nvr_vk.cpp
+    vulkan/nvr_vma_impl.cpp
+    vulkan/nvr_gfx.cpp
+    vulkan/nvr_fb.cpp
+    shader/nvr_spirv.cpp
+    shader/nvr_dx9bc.cpp
+    shader/nvr_compile.cpp
+    shader/nvr_fff.cpp
+    d3d9/nvr_d3d9.cpp
+    d3d9/nvr_device.cpp
+    d3d9/nvr_device2.cpp
+    d3d9/nvr_res.cpp
+    d3d9/nvr_draw.cpp
+    d3d9/nvr_draw2.cpp
+    d3d9/nvr_pack.cpp
+    d3d9/nvr_present.cpp
+    d3d9/nvr_api.cpp
 )
 
 add_library(native_render SHARED ${NVR_SRC})
 
+# thirdparty/vma e o dxvk/sdlinc ficam um nivel ACIMA deste CMakeLists
+# (native-render/thirdparty, jni/dxvk, jni/sdlinc).
 target_include_directories(native_render PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
-    ${CMAKE_CURRENT_SOURCE_DIR}/src
-    ${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/vma
-    ${CMAKE_CURRENT_SOURCE_DIR}/../dxvk/include/native/directx
-    ${CMAKE_CURRENT_SOURCE_DIR}/../dxvk/include/native/windows
-    ${CMAKE_CURRENT_SOURCE_DIR}/../sdlinc
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/../thirdparty/vma
+    ${CMAKE_CURRENT_SOURCE_DIR}/../thirdparty/spirv_inc
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../dxvk/include/native/directx
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../dxvk/include/native/windows
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../dxvk/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../sdlinc
 )
 
 find_package(Vulkan)

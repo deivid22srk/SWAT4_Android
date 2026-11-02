@@ -5,8 +5,10 @@
 #  3. valida cada .spv com spirv-val (se disponivel)
 # Uso: run_shaders.sh [dir-saidas]
 set -u
-ROOT=/home/z/my-project/SWAT4_Android/android/app/jni
-NVR=$ROOT/native-render
+# Raiz do repo derivada deste script (funciona no checkout do CI e no host)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+NVR="$(cd "$SCRIPT_DIR/.." && pwd)"
+ROOT="$(cd "$NVR/../.." && pwd)"
 OUT=${1:-/tmp/nvr-spv}
 SPIRV_VAL=/tmp/spirv-tools/build/tools/spirv-val
 BINDIR=/tmp/nvr-test

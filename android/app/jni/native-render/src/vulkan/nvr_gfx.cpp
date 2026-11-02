@@ -315,10 +315,11 @@ VkDescriptorSet DescAllocator::get(VkDescriptorPool pool, uint64_t tex_hash,
                                    const std::function<void(VkDescriptorSet)> &fill) {
     auto it = m_sets.find(tex_hash);
     if (it != m_sets.end()) return it->second;
+    VkDescriptorSetLayout sl = m_pipe->set_layout();
     VkDescriptorSetAllocateInfo ai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
     ai.descriptorPool = pool;
     ai.descriptorSetCount = 1;
-    ai.pSetLayouts = &m_pipe->set_layout();
+    ai.pSetLayouts = &sl;
     VkDescriptorSet set = VK_NULL_HANDLE;
     if (vkAllocateDescriptorSets(m_core->device(), &ai, &set) != VK_SUCCESS) {
         NVR_ERROR("vkAllocateDescriptorSets falhou (pool cheio?)");
