@@ -8,7 +8,8 @@ set -u
 # Raiz do repo derivada deste script (funciona no checkout do CI e no host)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 NVR="$(cd "$SCRIPT_DIR/.." && pwd)"
-ROOT="$(cd "$NVR/../.." && pwd)"
+# repositorio = tres niveis acima de native-render (android/app/jni/native-render)
+ROOT="$(cd "$NVR/../../.." && pwd)"
 OUT=${1:-/tmp/nvr-spv}
 SPIRV_VAL="${SPIRV_VAL:-/tmp/spirv-tools/build/tools/spirv-val}"
 BINDIR=/tmp/nvr-test
