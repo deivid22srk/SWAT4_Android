@@ -115,3 +115,19 @@ A cópia de jogo não foi baixada nesta etapa: os documentos existentes já cont
 - `tools/swat4_modules.py`
 - `android/app/jni/CMakeLists.txt`
 - `android/app/build.gradle`
+
+## Implementação incremental: probe Vulkan nativo
+
+Foi adicionada a biblioteca `nativevk_probe`, separada do DXVK, com uma chamada JNI executada no início de `GameActivity`. O relatório é gravado em `<pasta-do-jogo>/port/native_vulkan_probe.txt`.
+
+O probe consulta:
+- versão anunciada pelo loader Vulkan (com resolução dinâmica da função de consulta para não exigir o símbolo Vulkan 1.1 em loaders antigos);
+- quantidade e identificação das GPUs físicas;
+- versão Vulkan e versão do driver por dispositivo;
+- filas e presença de fila gráfica;
+- heaps de memória local do dispositivo;
+- recursos básicos relevantes para caracterizar a GPU.
+
+**Limites explícitos:** não cria um `VkDevice`, não cria surface/swapchain, não submete comandos, não compila shaders e não renderiza. Portanto, não é ainda o renderizador nativo D3D9→Vulkan e não substitui DXVK. O backend DXVK permanece carregado e ativo.
+
+A biblioteca foi ligada ao build Android e o relatório é opcional: falhas no probe são capturadas no Java e não devem impedir a inicialização do jogo. A compilação e o comportamento em dispositivo ainda precisam ser confirmados pelo CI e por teste real.
