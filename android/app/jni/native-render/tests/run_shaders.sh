@@ -10,7 +10,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 NVR="$(cd "$SCRIPT_DIR/.." && pwd)"
 ROOT="$(cd "$NVR/../.." && pwd)"
 OUT=${1:-/tmp/nvr-spv}
-SPIRV_VAL=/tmp/spirv-tools/build/tools/spirv-val
+SPIRV_VAL="${SPIRV_VAL:-/tmp/spirv-tools/build/tools/spirv-val}"
 BINDIR=/tmp/nvr-test
 mkdir -p "$BINDIR" "$OUT"
 

@@ -31,7 +31,7 @@ struct RefBase {
     return E_NOINTERFACE;
 
 
-struct VkCore;
+class VkCore;
 class NrDevice;
 
 // -------------------------------------------------------------- shader cache

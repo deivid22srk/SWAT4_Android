@@ -264,8 +264,8 @@ void NrDevice::transition_image(SurfCore &s, VkImageLayout to, VkAccessFlags dst
     if (*cur == to) return;
     if (!s.img()) return;
     VkImageAspectFlags aspect = s.is_depth
-        ? (s.has_stencil ? VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT
-                         : VK_IMAGE_ASPECT_DEPTH_BIT)
+        ? (VkImageAspectFlags)(s.has_stencil ? (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT)
+                                             : VK_IMAGE_ASPECT_DEPTH_BIT)
         : VK_IMAGE_ASPECT_COLOR_BIT;
     uint32_t levels = s.tex ? s.tex->levels : 1;
     uint32_t layers = s.tex ? (s.tex->type == D3DRTYPE_CUBETEXTURE ? 6u : 1u) : 1;

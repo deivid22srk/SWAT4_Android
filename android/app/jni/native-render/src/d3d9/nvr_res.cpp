@@ -340,8 +340,9 @@ HRESULT NrDevice::CreateDepthStencilSurface(UINT w, UINT h, D3DFORMAT fmt, D3DMU
     vi.image = sc.image;
     vi.viewType = VK_IMAGE_VIEW_TYPE_2D;
     vi.format = sc.actual_fmt;
-    vi.subresourceRange = {stencil ? VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT
-                                   : VK_IMAGE_ASPECT_DEPTH_BIT,
+    vi.subresourceRange = {(VkImageAspectFlags)(stencil ? (VK_IMAGE_ASPECT_DEPTH_BIT |
+                                                                        VK_IMAGE_ASPECT_STENCIL_BIT)
+                                                                        : VK_IMAGE_ASPECT_DEPTH_BIT),
                            0, 1, 0, 1};
     vkCreateImageView(m_vk->device(), &vi, nullptr, &sc.view_ds);
     *out = wrap_standalone(std::move(sc));
@@ -576,8 +577,9 @@ HRESULT NrTextureVol::LockBox(UINT level, D3DLOCKED_BOX *out, const D3DBOX *box,
     out->RowPitch = (INT)row_pitch;
     out->SlicePitch = (INT)slice_pitch;
     out->pBits = core.sysmem.data() + core.level_offset[level];
-    if (box) out->pBits += (size_t)box->Front * slice_pitch + (size_t)box->Top * row_pitch +
-                           box->Left * (row_pitch / std::max(1u, lw));
+    if (box)
+        out->pBits = (uint8_t *)out->pBits + (size_t)box->Front * slice_pitch +
+                     (size_t)box->Top * row_pitch + box->Left * (row_pitch / std::max(1u, lw));
     core.dirty[level] = !(flags & D3DLOCK_READONLY);
     core.whole_dirty = !(flags & D3DLOCK_READONLY);
     return D3D_OK;
@@ -598,8 +600,9 @@ HRESULT NrVolume::LockBox(D3DLOCKED_BOX *out, const D3DBOX *box, DWORD flags) {
     out->RowPitch = (INT)row_pitch;
     out->SlicePitch = (INT)slice_pitch;
     out->pBits = tex->sysmem.data() + tex->level_offset[level];
-    if (box) out->pBits += (size_t)box->Front * slice_pitch + (size_t)box->Top * row_pitch +
-                           box->Left * (row_pitch / std::max(1u, lw));
+    if (box)
+        out->pBits = (uint8_t *)out->pBits + (size_t)box->Front * slice_pitch +
+                     (size_t)box->Top * row_pitch + box->Left * (row_pitch / std::max(1u, lw));
     tex->dirty[level] = !(flags & D3DLOCK_READONLY);
     tex->whole_dirty = !(flags & D3DLOCK_READONLY);
     return D3D_OK;
