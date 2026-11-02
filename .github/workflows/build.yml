@@ -25,6 +25,14 @@ on:
         description: "parallel compiles of recompiled code (1-2 GB RAM each)"
         type: string
         default: "3"
+  pull_request:
+    branches: [main]
+    paths:
+      - "android/**"
+      - "runtime/**"
+      - "tools/**"
+      - "ci/**"
+      - ".github/workflows/build.yml"
   push:
     branches: [main]
     paths:
@@ -205,3 +213,23 @@ jobs:
               --notes "Private builds of the port. Contains code recompiled from the game; do not redistribute." --prerelease
           gh release upload "$tag" "${{ steps.apk.outputs.path }}" --repo "$GEN_REPO" --clobber
           echo "::notice::APK uploaded to the private release $GEN_REPO@$tag"
+
+  # Host-side verification of the native-render shader layer (no GPU needed):
+  # assembles real D3D9 bytecode, translates it to SPIR-V and validates every
+  # emitted module with spirv-val. Keeps regressions out of the translator.
+  shader-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: spirv-tools
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq spirv-tools
+
+      - name: Build harness + validate generated SPIR-V
+        env:
+          SPIRV_VAL: /usr/bin/spirv-val
+        run: |
+          set -euo pipefail
+          android/app/jni/native-render/tests/run_shaders.sh /tmp/nvr-spv
