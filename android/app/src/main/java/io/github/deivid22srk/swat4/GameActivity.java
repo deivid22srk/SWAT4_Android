@@ -13,7 +13,7 @@ import org.libsdl.app.SDLActivity;
 public class GameActivity extends SDLActivity {
     @Override
     protected String[] getLibraries() {
-        return new String[] { "SDL2", "dxvk_d3d9", "main" };
+        return new String[] { "SDL2", "nativevk_probe", "dxvk_d3d9", "main" };
     }
 
     /* argv[1] = game folder, from the launcher. */
@@ -27,6 +27,7 @@ public class GameActivity extends SDLActivity {
     protected void onCreate(Bundle savedInstanceState) {
         saveLastExit();
         super.onCreate(savedInstanceState);
+        saveNativeVulkanProbe();
         installHud();
     }
 
@@ -38,6 +39,26 @@ public class GameActivity extends SDLActivity {
     }
 
     private HudOverlay hud; /* kept for onPause: drop held buttons */
+
+    private native String nativeVulkanReport();
+
+    /* Record Android Vulkan loader and physical GPU capabilities.
+     * Diagnostic only: DXVK remains the active D3D9 implementation. */
+    private void saveNativeVulkanProbe() {
+        String game = getIntent().getStringExtra("game");
+        if (game == null) return;
+        try {
+            String report = nativeVulkanReport();
+            if (report == null) return;
+            File dir = new File(game, "port");
+            if (!dir.isDirectory() && !dir.mkdirs()) return;
+            try (FileWriter w = new FileWriter(new File(dir, "native_vulkan_probe.txt"))) {
+                w.write(report);
+            }
+        } catch (Throwable ignored) {
+            /* A diagnostic failure must never prevent the game from launching. */
+        }
+    }
 
     /* The contextual touch HUD: a real Android View composited above the
      * game surface (visible through menus, movies and loading frames) that
