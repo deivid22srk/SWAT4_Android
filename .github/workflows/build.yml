@@ -228,10 +228,8 @@ jobs:
         run: sudo apt-get update -qq && sudo apt-get install -y -qq spirv-tools
 
       - name: Build harness + validate generated SPIR-V
+        env:
+          SPIRV_VAL: /usr/bin/spirv-val
         run: |
           set -euo pipefail
-          val="$(command -v spirv-val)"
-          echo "using spirv-val: $val"
-          sed "s|SPIRV_VAL=/tmp/spirv-tools/build/tools/spirv-val|SPIRV_VAL=$val|" \
-            android/app/jni/native-render/tests/run_shaders.sh > /tmp/run_shaders_ci.sh
-          bash /tmp/run_shaders_ci.sh /tmp/nvr-spv
+          android/app/jni/native-render/tests/run_shaders.sh /tmp/nvr-spv
