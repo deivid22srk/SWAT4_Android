@@ -45,8 +45,12 @@ Java_io_github_deivid22srk_swat4_GameActivity_nativeVulkanReport(
         << "mode=diagnostic-only; no renderer/device queues are created\n";
 
     uint32_t loaderVersion = VK_API_VERSION_1_0;
-    const VkResult versionResult = vkEnumerateInstanceVersion(&loaderVersion);
-    if (versionResult != VK_SUCCESS) {
+    const auto enumerateVersion = reinterpret_cast<PFN_vkEnumerateInstanceVersion>(
+        vkGetInstanceProcAddr(VK_NULL_HANDLE, "vkEnumerateInstanceVersion"));
+    const VkResult versionResult = enumerateVersion ? enumerateVersion(&loaderVersion) : VK_SUCCESS;
+    if (!enumerateVersion) {
+        out << "loader_version_query=unavailable (Vulkan 1.0 loader entry point)\n";
+    } else if (versionResult != VK_SUCCESS) {
         out << "loader_version_query=" << resultName(versionResult) << "\n";
         loaderVersion = VK_API_VERSION_1_0;
     } else {
