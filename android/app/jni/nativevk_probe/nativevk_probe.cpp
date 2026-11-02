@@ -8,7 +8,7 @@
 
 namespace {
 
-const char* resultName(VkResult result) {
+std::string resultName(VkResult result) {
     switch (result) {
     case VK_SUCCESS: return "VK_SUCCESS";
     case VK_NOT_READY: return "VK_NOT_READY";
@@ -83,7 +83,8 @@ Java_io_github_deivid22srk_swat4_GameActivity_nativeVulkanReport(
 
     VkPhysicalDevice devices[16]{};
     const uint32_t capacity = std::min(physicalCount, 16u);
-    result = vkEnumeratePhysicalDevices(instance, &physicalCount, devices);
+    uint32_t enumeratedCount = capacity;
+    result = vkEnumeratePhysicalDevices(instance, &enumeratedCount, devices);
     if (result != VK_SUCCESS) {
         out << "physical_device_enumeration=" << resultName(result) << "\n"
             << "probe_complete=no\n";
@@ -92,7 +93,7 @@ Java_io_github_deivid22srk_swat4_GameActivity_nativeVulkanReport(
     }
 
     out << "physical_devices=" << physicalCount << "\n";
-    for (uint32_t i = 0; i < capacity; ++i) {
+    for (uint32_t i = 0; i < enumeratedCount; ++i) {
         VkPhysicalDeviceProperties properties{};
         vkGetPhysicalDeviceProperties(devices[i], &properties);
         VkPhysicalDeviceFeatures features{};
@@ -113,9 +114,10 @@ Java_io_github_deivid22srk_swat4_GameActivity_nativeVulkanReport(
         vkGetPhysicalDeviceQueueFamilyProperties(devices[i], &queueCount, nullptr);
         VkQueueFamilyProperties queues[32]{};
         const uint32_t queueCapacity = std::min(queueCount, 32u);
-        vkGetPhysicalDeviceQueueFamilyProperties(devices[i], &queueCount, queues);
+        uint32_t enumeratedQueueCount = queueCapacity;
+        vkGetPhysicalDeviceQueueFamilyProperties(devices[i], &enumeratedQueueCount, queues);
         bool graphicsQueue = false;
-        for (uint32_t q = 0; q < queueCapacity; ++q) {
+        for (uint32_t q = 0; q < enumeratedQueueCount; ++q) {
             const bool graphics = (queues[q].queueFlags & VK_QUEUE_GRAPHICS_BIT) != 0;
             graphicsQueue = graphicsQueue || graphics;
             out << "queue[" << q << "].flags=0x" << std::hex
