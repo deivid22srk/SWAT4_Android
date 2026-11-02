@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <sstream>
 #include <string>
+#include <vector>
 
 namespace {
 
@@ -85,10 +86,9 @@ Java_io_github_deivid22srk_swat4_GameActivity_nativeVulkanReport(
         return env->NewStringUTF(out.str().c_str());
     }
 
-    VkPhysicalDevice devices[16]{};
-    const uint32_t capacity = std::min(physicalCount, 16u);
-    uint32_t enumeratedCount = capacity;
-    result = vkEnumeratePhysicalDevices(instance, &enumeratedCount, devices);
+    std::vector<VkPhysicalDevice> devices(physicalCount);
+    uint32_t enumeratedCount = physicalCount;
+    result = vkEnumeratePhysicalDevices(instance, &enumeratedCount, devices.data());
     if (result != VK_SUCCESS) {
         out << "physical_device_enumeration=" << resultName(result) << "\n"
             << "probe_complete=no\n";
@@ -116,10 +116,10 @@ Java_io_github_deivid22srk_swat4_GameActivity_nativeVulkanReport(
 
         uint32_t queueCount = 0;
         vkGetPhysicalDeviceQueueFamilyProperties(devices[i], &queueCount, nullptr);
-        VkQueueFamilyProperties queues[32]{};
-        const uint32_t queueCapacity = std::min(queueCount, 32u);
-        uint32_t enumeratedQueueCount = queueCapacity;
-        vkGetPhysicalDeviceQueueFamilyProperties(devices[i], &enumeratedQueueCount, queues);
+        std::vector<VkQueueFamilyProperties> queues(queueCount);
+        uint32_t enumeratedQueueCount = queueCount;
+        if (queueCount != 0)
+            vkGetPhysicalDeviceQueueFamilyProperties(devices[i], &enumeratedQueueCount, queues.data());
         bool graphicsQueue = false;
         for (uint32_t q = 0; q < enumeratedQueueCount; ++q) {
             const bool graphics = (queues[q].queueFlags & VK_QUEUE_GRAPHICS_BIT) != 0;
