@@ -52,6 +52,9 @@ else()
     target_link_libraries(native_render PRIVATE vulkan)
 endif()
 
+# SDL2 cria a VkSurfaceKHR (mesma via do dxvk); o Gradle linka libs
+# compartilhadas com --no-undefined, entao o modulo precisa declarar tudo.
+target_link_libraries(native_render PRIVATE SDL2)
 if (ANDROID)
     target_link_libraries(native_render PRIVATE android log)
 endif()
