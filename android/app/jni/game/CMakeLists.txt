@@ -31,4 +31,6 @@ target_include_directories(main PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/../dxvk/include/native/windows)
 
 set_property(SOURCE ${GEN_SRC} PROPERTY JOB_POOL_COMPILE gen)
-target_link_libraries(main PRIVATE SDL2 dxvk_d3d9 android log)
+# native_render: backend Vulkan proprio (fallback dxvk continua linkado;
+# a escolha em runtime vive em runtime/renderer_host.cpp)
+target_link_libraries(main PRIVATE SDL2 dxvk_d3d9 native_render android log)

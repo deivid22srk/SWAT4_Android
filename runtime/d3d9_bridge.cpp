@@ -9,6 +9,7 @@
 void shadow_flush(void *obj);
 void shadow_forget(void *obj);
 #include "d3d9_bridge.h"
+#include "renderer_host.h"
 void bc_forget(void *obj);
 bool bc_lock(void *tex, uint32_t sub, uint32_t w, uint32_t h, const RECT *r, DWORD flags, uint32_t out,
              const std::function<HRESULT(D3DLOCKED_RECT *, const RECT *)> &lock, HRESULT *hr);
@@ -912,7 +913,9 @@ static void shim_Direct3DCreate9(CPU *c) {
     static bool init = false;
     if (!init) { d3d9_register_vtables(); init = true; }
     LOG("Direct3DCreate9(%u)", ARG(0));
-    IDirect3D9 *d3d = Direct3DCreate9(D3D_SDK_VERSION);
+    // despachante: dxvk (default/fallback) ou native-render, por LB_RENDERER
+    // ou <jogo>/port/renderer.txt (ver runtime/renderer_host.cpp)
+    IDirect3D9 *d3d = renderer_host_direct3d9(D3D_SDK_VERSION);
     RET(d3d9_wrap(d3d, IFACE_IDirect3D9), 1);
 }
 
